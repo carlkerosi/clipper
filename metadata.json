@@ -1,0 +1,6 @@
+{
+  "name": "ClipForge AI - Smart Long-to-Short Video Clipper",
+  "description": "AI-powered video clipping app that finds viral highlights, funny moments, and auto-generates animated TikTok/Reels captions with 9:16 vertical export.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
