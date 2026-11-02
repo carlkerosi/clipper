@@ -1,4 +1,4 @@
-import { CaptionChunk, CaptionPreset, FramingMode } from '../types';
+import { CaptionChunk, CaptionPreset, FramingMode, CaptionEntranceAnimation, CaptionExitAnimation } from '../types';
 import { drawVerticalFrame } from './captionRenderer';
 
 export interface VideoExportOptions {
@@ -13,6 +13,8 @@ export interface VideoExportOptions {
   captionPosition: 'top' | 'middle' | 'lower_third' | 'bottom';
   captionFontSize: number;
   captionColor: string;
+  captionEntranceAnim?: CaptionEntranceAnimation;
+  captionExitAnim?: CaptionExitAnimation;
   captions: CaptionChunk[];
   showHookBanner: boolean;
   hookBannerText: string;
@@ -34,6 +36,8 @@ export async function exportVerticalVideo(options: VideoExportOptions): Promise<
     captionPosition,
     captionFontSize,
     captionColor,
+    captionEntranceAnim,
+    captionExitAnim,
     captions,
     showHookBanner,
     hookBannerText,
@@ -168,6 +172,8 @@ export async function exportVerticalVideo(options: VideoExportOptions): Promise<
         captionPosition,
         captionFontSize: scaledFontSize,
         captionColor,
+        captionEntranceAnim,
+        captionExitAnim,
         framingMode,
         panX,
         showHookBanner,

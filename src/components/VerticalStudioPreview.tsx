@@ -119,6 +119,8 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
         captionPosition: settings.captionPosition,
         captionFontSize: settings.captionFontSize,
         captionColor: settings.captionColor,
+        captionEntranceAnim: settings.captionEntranceAnim,
+        captionExitAnim: settings.captionExitAnim,
         framingMode: settings.framingMode,
         panX: settings.panX,
         showHookBanner: settings.showHookBanner,

@@ -129,6 +129,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         captionPosition: settings.captionPosition,
         captionFontSize: settings.captionFontSize,
         captionColor: settings.captionColor,
+        captionEntranceAnim: settings.captionEntranceAnim,
+        captionExitAnim: settings.captionExitAnim,
         captions: activeClip.captions,
         showHookBanner: settings.showHookBanner,
         hookBannerText: settings.hookBannerText || activeClip.hook,

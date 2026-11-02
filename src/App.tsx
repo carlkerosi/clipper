@@ -31,6 +31,8 @@ export default function App() {
     captionColor: '#FACC15',
     captionPosition: 'lower_third',
     captionFontSize: 32,
+    captionEntranceAnim: 'pop',
+    captionExitAnim: 'fade',
     showHookBanner: true,
     hookBannerText: SAMPLE_VIDEOS[0].highlights[0].hook,
     showProgressBar: true,

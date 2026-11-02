@@ -59,6 +59,23 @@ export interface VideoSource {
   highlights: ClipHighlight[];
 }
 
+export type CaptionEntranceAnimation =
+  | 'pop'         // Energetic spring pop with scale overshoot
+  | 'slide_up'    // Smooth upward slide with motion flare
+  | 'slide_down'  // Punchy drop from above
+  | 'fade'        // Cinematic smooth opacity fade
+  | 'bounce'      // Playful double-bounce impact
+  | 'zoom_in'     // Deep punch zoom from 0.4 to 1.0
+  | 'glow_burst'; // Neon flare and flash into place
+
+export type CaptionExitAnimation =
+  | 'fade'        // Clean fade out
+  | 'slide_down'  // Smooth drop off screen
+  | 'slide_up'    // Float up and disappear
+  | 'shrink'      // Scale down to zero
+  | 'pop_out'     // Snappy outward blast
+  | 'none';       // Instant cut
+
 export interface ExportSettings {
   resolution: '1080p' | '720p';
   framerate: 30 | 60;
@@ -67,6 +84,8 @@ export interface ExportSettings {
   captionColor: string;
   captionPosition: 'top' | 'middle' | 'lower_third' | 'bottom';
   captionFontSize: number;
+  captionEntranceAnim?: CaptionEntranceAnimation;
+  captionExitAnim?: CaptionExitAnimation;
   showHookBanner: boolean;
   hookBannerText: string;
   showProgressBar: boolean;
@@ -74,3 +93,4 @@ export interface ExportSettings {
   panX: number; // -100 to 100 for framing speaker
   splitBottomType?: 'minecraft' | 'subway' | 'satisfying' | 'gameplay';
 }
+

@@ -368,10 +368,13 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
                     </div>
                   </div>
 
-                  {/* Bottom: Animated Bouncing Hormozi Caption Pill */}
+                  {/* Bottom: Animated Bouncing Caption Pill */}
                   <div className="text-center pb-2">
                     {activeCaption ? (
-                      <div className="inline-block px-3 py-1.5 rounded-xl bg-black/90 backdrop-blur-md border border-amber-500/40 text-xs font-black text-white shadow-xl tracking-wide max-w-[90%]">
+                      <div
+                        key={`${clip.id}-${activeCaption.start}`}
+                        className="inline-block px-3 py-1.5 rounded-xl bg-black/90 backdrop-blur-md border border-amber-500/40 text-xs font-black text-white shadow-xl tracking-wide max-w-[90%] anim-entrance-pop"
+                      >
                         {activeCaption.emphasisWord && (
                           <span className="text-amber-400 font-black mr-1 animate-pulse">
                             {activeCaption.emphasisWord.toUpperCase()}

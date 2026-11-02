@@ -1,1 +1,215 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ============================================================
+   KINETIC CAPTION ENTRANCE & EXIT ANIMATION SYSTEM
+   ============================================================ */
+
+/* Entrance Animations */
+@keyframes captionEntrancePop {
+  0% {
+    opacity: 0;
+    transform: scale(0.4) translateY(12px);
+  }
+  65% {
+    opacity: 1;
+    transform: scale(1.15) translateY(-2px);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes captionEntranceSlideUp {
+  0% {
+    opacity: 0;
+    transform: translateY(32px);
+    filter: blur(4px);
+  }
+  70% {
+    opacity: 1;
+    filter: blur(0px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes captionEntranceSlideDown {
+  0% {
+    opacity: 0;
+    transform: translateY(-32px);
+    filter: blur(4px);
+  }
+  70% {
+    opacity: 1;
+    filter: blur(0px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes captionEntranceFade {
+  0% {
+    opacity: 0;
+    filter: blur(6px);
+  }
+  100% {
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+@keyframes captionEntranceBounce {
+  0% {
+    opacity: 0;
+    transform: translateY(-40px) scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(8px) scale(1.08);
+  }
+  75% {
+    transform: translateY(-4px) scale(0.97);
+  }
+  100% {
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes captionEntranceZoomIn {
+  0% {
+    opacity: 0;
+    transform: scale(0.2);
+  }
+  80% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes captionEntranceGlowBurst {
+  0% {
+    opacity: 0;
+    transform: scale(0.8);
+    filter: drop-shadow(0 0 25px rgba(250, 204, 21, 0.9)) brightness(1.8);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.1);
+    filter: drop-shadow(0 0 16px rgba(250, 204, 21, 0.7)) brightness(1.3);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+    filter: drop-shadow(0 0 4px rgba(250, 204, 21, 0.3)) brightness(1);
+  }
+}
+
+/* Exit Animations */
+@keyframes captionExitFade {
+  0% {
+    opacity: 1;
+    filter: blur(0);
+  }
+  100% {
+    opacity: 0;
+    filter: blur(6px);
+  }
+}
+
+@keyframes captionExitSlideDown {
+  0% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(30px);
+    filter: blur(4px);
+  }
+}
+
+@keyframes captionExitSlideUp {
+  0% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-30px);
+    filter: blur(4px);
+  }
+}
+
+@keyframes captionExitShrink {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.15);
+  }
+}
+
+@keyframes captionExitPopOut {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  30% {
+    transform: scale(1.2);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+}
+
+.anim-entrance-pop {
+  animation: captionEntrancePop 0.35s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+}
+.anim-entrance-slide_up {
+  animation: captionEntranceSlideUp 0.32s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+.anim-entrance-slide_down {
+  animation: captionEntranceSlideDown 0.32s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+.anim-entrance-fade {
+  animation: captionEntranceFade 0.28s ease-out forwards;
+}
+.anim-entrance-bounce {
+  animation: captionEntranceBounce 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+.anim-entrance-zoom_in {
+  animation: captionEntranceZoomIn 0.32s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+.anim-entrance-glow_burst {
+  animation: captionEntranceGlowBurst 0.4s ease-out forwards;
+}
+
+.anim-exit-fade {
+  animation: captionExitFade 0.25s ease-in forwards;
+}
+.anim-exit-slide_down {
+  animation: captionExitSlideDown 0.28s cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+.anim-exit-slide_up {
+  animation: captionExitSlideUp 0.28s cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+.anim-exit-shrink {
+  animation: captionExitShrink 0.25s cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+.anim-exit-pop_out {
+  animation: captionExitPopOut 0.25s cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+

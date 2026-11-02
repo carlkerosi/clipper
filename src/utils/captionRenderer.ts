@@ -1,4 +1,4 @@
-import { CaptionChunk, CaptionPreset, FramingMode } from '../types';
+import { CaptionChunk, CaptionPreset, FramingMode, CaptionEntranceAnimation, CaptionExitAnimation } from '../types';
 
 export interface RenderFrameOptions {
   ctx: CanvasRenderingContext2D;
@@ -12,6 +12,8 @@ export interface RenderFrameOptions {
   captionPosition: 'top' | 'middle' | 'lower_third' | 'bottom';
   captionFontSize: number;
   captionColor: string;
+  captionEntranceAnim?: CaptionEntranceAnimation;
+  captionExitAnim?: CaptionExitAnimation;
   framingMode: FramingMode;
   panX: number; // -100 to 100
   showHookBanner: boolean;
@@ -35,6 +37,8 @@ export function drawVerticalFrame(options: RenderFrameOptions) {
     captionPosition,
     captionFontSize,
     captionColor,
+    captionEntranceAnim = 'pop',
+    captionExitAnim = 'fade',
     framingMode,
     panX,
     showHookBanner,
@@ -131,7 +135,7 @@ export function drawVerticalFrame(options: RenderFrameOptions) {
     drawHookBanner(ctx, canvasWidth, canvasHeight, hookBannerText);
   }
 
-  // Draw Animated Captions
+  // Draw Animated Captions with Entrance and Exit Effects
   drawCaptions(
     ctx,
     canvasWidth,
@@ -141,7 +145,9 @@ export function drawVerticalFrame(options: RenderFrameOptions) {
     captionPreset,
     captionPosition,
     captionFontSize,
-    captionColor
+    captionColor,
+    captionEntranceAnim,
+    captionExitAnim
   );
 
   // Draw Progress Bar at bottom
@@ -305,7 +311,7 @@ function drawHookBanner(
   ctx.restore();
 }
 
-// Draw Animated TikTok/MrBeast captions
+// Draw Animated TikTok/MrBeast captions with kinetic Entrance & Exit transitions
 function drawCaptions(
   ctx: CanvasRenderingContext2D,
   w: number,
@@ -315,7 +321,9 @@ function drawCaptions(
   preset: CaptionPreset,
   position: 'top' | 'middle' | 'lower_third' | 'bottom',
   fontSize: number,
-  primaryColor: string
+  primaryColor: string,
+  entranceAnimation: CaptionEntranceAnimation = 'pop',
+  exitAnimation: CaptionExitAnimation = 'fade'
 ) {
   // Find caption chunk that is currently active
   const activeChunk = captions.find(
@@ -331,6 +339,84 @@ function drawCaptions(
   if (position === 'top') posY = h * 0.25;
   if (position === 'middle') posY = h * 0.50;
   if (position === 'bottom') posY = h * 0.84;
+
+  // Kinetic Entrance & Exit Calculations
+  const entranceDuration = 0.24;
+  const exitDuration = 0.18;
+  const timeSinceStart = currentTime - activeChunk.start;
+  const timeUntilEnd = activeChunk.end - currentTime;
+
+  let animScale = 1;
+  let animOffsetY = 0;
+  let animAlpha = 1;
+  let animGlowBlur = 0;
+
+  // 1. Entrance Phase
+  if (timeSinceStart < entranceDuration) {
+    const p = Math.max(0, Math.min(1, timeSinceStart / entranceDuration));
+    if (entranceAnimation === 'pop') {
+      // Spring pop with snappy overshoot
+      animScale = p < 0.65 ? 0.4 + (p / 0.65) * 0.75 : 1.15 - ((p - 0.65) / 0.35) * 0.15;
+      animOffsetY = (1 - p) * 12;
+      animAlpha = Math.min(1, p * 1.8);
+    } else if (entranceAnimation === 'slide_up') {
+      const ease = 1 - Math.pow(1 - p, 3);
+      animOffsetY = (1 - ease) * 32;
+      animAlpha = ease;
+    } else if (entranceAnimation === 'slide_down') {
+      const ease = 1 - Math.pow(1 - p, 3);
+      animOffsetY = -(1 - ease) * 32;
+      animAlpha = ease;
+    } else if (entranceAnimation === 'fade') {
+      animAlpha = p;
+    } else if (entranceAnimation === 'bounce') {
+      const bounceOffset = Math.sin(p * Math.PI * 2.2) * (1 - p) * 22;
+      animOffsetY = -bounceOffset;
+      animScale = 0.85 + p * 0.15;
+      animAlpha = Math.min(1, p * 2);
+    } else if (entranceAnimation === 'zoom_in') {
+      const ease = 1 - Math.pow(1 - p, 3);
+      animScale = 0.25 + ease * 0.75;
+      animAlpha = ease;
+    } else if (entranceAnimation === 'glow_burst') {
+      const ease = 1 - Math.pow(1 - p, 3);
+      animScale = 0.85 + ease * 0.15;
+      animGlowBlur = (1 - p) * 24;
+      animAlpha = Math.min(1, p * 2);
+    }
+  }
+
+  // 2. Exit Phase
+  if (timeUntilEnd < exitDuration && exitAnimation !== 'none') {
+    const p = Math.max(0, Math.min(1, (exitDuration - timeUntilEnd) / exitDuration));
+    if (exitAnimation === 'fade') {
+      animAlpha *= (1 - p);
+    } else if (exitAnimation === 'slide_down') {
+      animOffsetY += p * 30;
+      animAlpha *= (1 - p);
+    } else if (exitAnimation === 'slide_up') {
+      animOffsetY -= p * 30;
+      animAlpha *= (1 - p);
+    } else if (exitAnimation === 'shrink') {
+      animScale *= Math.max(0.05, 1 - p * 0.9);
+      animAlpha *= (1 - p);
+    } else if (exitAnimation === 'pop_out') {
+      animScale *= (1 + p * 0.22);
+      animAlpha *= (1 - p);
+    }
+  }
+
+  ctx.globalAlpha = Math.max(0, Math.min(1, animAlpha));
+  if (animGlowBlur > 0) {
+    ctx.shadowColor = primaryColor || '#FACC15';
+    ctx.shadowBlur = animGlowBlur;
+  }
+
+  if (animScale !== 1 || animOffsetY !== 0) {
+    ctx.translate(w / 2, posY + animOffsetY);
+    ctx.scale(animScale, animScale);
+    ctx.translate(-w / 2, -(posY + animOffsetY));
+  }
 
   const words = activeChunk.words && activeChunk.words.length > 0
     ? activeChunk.words
