@@ -5,16 +5,12 @@ import {
   RotateCcw,
   Volume2,
   VolumeX,
-  Smartphone,
   Eye,
-  Sliders,
-  Sparkles,
   MoveHorizontal,
   Maximize2,
-  Minimize2,
-  Layers,
+  Repeat,
 } from 'lucide-react';
-import { ClipHighlight, ExportSettings, FramingMode, CaptionChunk } from '../types';
+import { ClipHighlight, ExportSettings, FramingMode } from '../types';
 import { drawVerticalFrame } from '../utils/captionRenderer';
 
 interface VerticalStudioPreviewProps {
@@ -157,7 +153,6 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
         await video.play();
         setIsPlaying(true);
       } catch (err) {
-        // Fallback: Muted playback if browser blocked unmuted autoplay
         video.muted = true;
         setIsMuted(true);
         try {
@@ -207,25 +202,25 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
   return (
     <div
       ref={containerRef}
-      className="flex flex-col items-center justify-between h-full bg-slate-900/60 rounded-2xl border border-slate-800 p-4 shadow-xl"
+      className="flex flex-col items-center justify-between h-full bg-zinc-900/80 rounded-2xl border border-zinc-800 p-4 shadow-xl"
     >
       {/* Top Controls Toolbar */}
-      <div className="w-full flex items-center justify-between gap-2 mb-3">
+      <div className="w-full flex items-center justify-between gap-2 mb-2">
         {/* Framing mode buttons */}
-        <div className="flex items-center gap-1 p-1 bg-slate-950/60 border border-slate-800 rounded-xl">
+        <div className="flex items-center gap-1 p-0.5 bg-zinc-950 rounded-lg border border-zinc-800">
           {[
             { id: 'smart_crop', label: 'Smart Crop (9:16)' },
-            { id: 'split_screen', label: 'Split Screen' },
+            { id: 'split_screen', label: 'Split' },
             { id: 'blur_fit', label: 'Ambient Blur' },
             { id: 'clean_box', label: 'Letterbox' },
           ].map((mode) => (
             <button
               key={mode.id}
               onClick={() => onUpdateSettings({ framingMode: mode.id as FramingMode })}
-              className={`px-2.5 py-1 text-xs font-semibold rounded-lg transition-all cursor-pointer ${
+              className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
                 settings.framingMode === mode.id
-                  ? 'bg-amber-500 text-slate-950 shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-zinc-800 text-white font-semibold'
+                  : 'text-zinc-400 hover:text-zinc-200'
               }`}
             >
               {mode.label}
@@ -233,26 +228,27 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
           ))}
         </div>
 
-        {/* Safe zone toggle & loop */}
-        <div className="flex items-center gap-1.5">
-          <button
-            onClick={() => setShowSafeZones(!showSafeZones)}
-            className={`flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold border transition-all cursor-pointer ${
-              showSafeZones
-                ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
-                : 'bg-slate-950/60 text-slate-400 border-slate-800 hover:text-slate-200'
-            }`}
-            title="Toggle TikTok / Instagram UI overlay safe margins"
-          >
-            <Eye className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Safe Zone</span>
-          </button>
-        </div>
+        {/* Safe zone toggle */}
+        <button
+          onClick={() => setShowSafeZones(!showSafeZones)}
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors cursor-pointer ${
+            showSafeZones
+              ? 'bg-rose-500/10 text-rose-300 border-rose-500/30'
+              : 'bg-zinc-950 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+          }`}
+          title="Toggle TikTok safe zones"
+        >
+          <Eye className="w-3.5 h-3.5" />
+          <span className="hidden sm:inline">TikTok Guides</span>
+        </button>
       </div>
 
-      {/* Center 9:16 Vertical Video Frame */}
-      <div className="relative flex-1 flex items-center justify-center w-full min-h-0 py-2">
-        <div className="relative h-full max-h-[560px] aspect-[9/16] rounded-[28px] overflow-hidden bg-black shadow-2xl shadow-black/90 border-4 border-slate-800 ring-1 ring-slate-700/50 flex items-center justify-center group">
+      {/* Center 9:16 Vertical Video Frame (Studio Phone Mockup) */}
+      <div className="relative flex-1 flex items-center justify-center w-full min-h-0 py-1">
+        <div className="relative h-full max-h-[540px] aspect-[9/16] rounded-[28px] overflow-hidden bg-black shadow-2xl border-4 border-zinc-800 ring-1 ring-zinc-700/60 flex items-center justify-center group">
+          {/* Subtle phone notch */}
+          <div className="absolute top-2 w-20 h-3.5 bg-zinc-900 rounded-full z-30 pointer-events-none opacity-80" />
+
           {/* Video or YouTube Layer */}
           {isYouTube && ytId ? (
             isPlaying ? (
@@ -299,7 +295,7 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
             className="absolute inset-0 w-full h-full object-cover pointer-events-none z-10"
           />
 
-          {/* Quick Play Overlay Button when paused */}
+          {/* Center Play Button Overlay */}
           {!isPlaying && (
             <div
               onClick={() => {
@@ -309,32 +305,24 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
                   togglePlay();
                 }
               }}
-              className="absolute inset-0 flex items-center justify-center bg-black/35 backdrop-blur-[1px] cursor-pointer z-20"
+              className="absolute inset-0 flex items-center justify-center bg-black/30 backdrop-blur-[1px] cursor-pointer z-20"
             >
-              <div className="w-16 h-16 rounded-full bg-amber-500 text-slate-950 flex items-center justify-center shadow-2xl shadow-amber-500/40 transform transition-transform hover:scale-110">
-                <Play className="w-8 h-8 ml-1 fill-slate-950" />
+              <div className="w-14 h-14 rounded-full bg-white text-zinc-950 flex items-center justify-center shadow-xl group-hover:scale-105 transition-transform">
+                <Play className="w-6 h-6 ml-0.5 fill-zinc-950" />
               </div>
             </div>
           )}
-
-          {/* Floating Hook Editor Pill on Hover */}
-          <div className="absolute top-4 inset-x-4 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-20">
-            <div className="bg-black/80 backdrop-blur-md rounded-xl p-2 border border-slate-700 flex items-center justify-between text-xs text-white">
-              <span className="truncate pr-2 font-medium">Hook: {settings.hookBannerText || activeClip.hook}</span>
-              <span className="text-[10px] text-amber-400 font-bold shrink-0">9:16 TikTok Mode</span>
-            </div>
-          </div>
         </div>
       </div>
 
-      {/* Horizontal Speaker Pan Re-framer (when in Smart Crop mode) */}
+      {/* Speaker Pan Re-framer (when in Smart Crop mode) */}
       {settings.framingMode === 'smart_crop' && (
-        <div className="w-full max-w-sm mt-2 px-3 py-2 bg-slate-950/60 rounded-xl border border-slate-800/80 flex items-center gap-3">
-          <MoveHorizontal className="w-4 h-4 text-amber-400 shrink-0" />
+        <div className="w-full max-w-sm mt-2 px-3 py-1.5 bg-zinc-950 rounded-xl border border-zinc-800 flex items-center gap-2.5">
+          <MoveHorizontal className="w-3.5 h-3.5 text-violet-400 shrink-0" />
           <div className="flex-1 flex flex-col">
-            <div className="flex items-center justify-between text-[11px] text-slate-400 font-medium mb-1">
-              <span>Speaker Pan Re-frame</span>
-              <span className="font-mono text-amber-400">
+            <div className="flex items-center justify-between text-[11px] text-zinc-400 font-medium mb-0.5">
+              <span>Speaker Pan</span>
+              <span className="font-mono tabular-nums text-zinc-300">
                 {settings.panX > 0 ? `+${settings.panX}%` : `${settings.panX}%`}
               </span>
             </div>
@@ -344,67 +332,64 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
               max={100}
               value={settings.panX}
               onChange={handlePanChange}
-              className="w-full accent-amber-500 h-1.5 bg-slate-800 rounded-lg cursor-pointer"
+              className="w-full accent-violet-500 h-1 bg-zinc-800 rounded-lg cursor-pointer"
             />
           </div>
           <button
             onClick={() => onUpdateSettings({ panX: 0 })}
-            className="text-[10px] px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded font-semibold transition-colors cursor-pointer"
-            title="Reset speaker focus to dead center"
+            className="text-[10px] px-2 py-0.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded font-medium transition-colors cursor-pointer"
           >
-            Center
+            Reset
           </button>
         </div>
       )}
 
       {/* Bottom Playback Bar */}
-      <div className="w-full flex items-center justify-between gap-3 mt-3 pt-3 border-t border-slate-800">
-        <div className="flex items-center gap-2">
+      <div className="w-full flex items-center justify-between gap-3 mt-2 pt-2.5 border-t border-zinc-800">
+        <div className="flex items-center gap-1.5">
           <button
             onClick={togglePlay}
-            className="p-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold transition-all shadow-md shadow-amber-500/20 cursor-pointer"
+            className="p-2 rounded-lg bg-white hover:bg-zinc-200 text-zinc-950 font-semibold transition-colors cursor-pointer"
             title={isPlaying ? 'Pause' : 'Play'}
           >
-            {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
+            {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}
           </button>
 
           <button
             onClick={restartClip}
-            className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors cursor-pointer"
-            title="Restart Clip"
+            className="p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors cursor-pointer"
+            title="Restart"
           >
-            <RotateCcw className="w-4 h-4" />
+            <RotateCcw className="w-3.5 h-3.5" />
           </button>
 
           <button
             onClick={toggleMute}
-            className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors cursor-pointer"
+            className="p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors cursor-pointer"
             title={isMuted ? 'Unmute' : 'Mute'}
           >
-            {isMuted ? <VolumeX className="w-4 h-4 text-rose-400" /> : <Volume2 className="w-4 h-4" />}
+            {isMuted ? <VolumeX className="w-3.5 h-3.5 text-zinc-400" /> : <Volume2 className="w-3.5 h-3.5 text-emerald-400" />}
           </button>
 
-          {/* Time display */}
-          <div className="text-xs font-mono text-slate-400 pl-1">
-            <span className="text-white font-bold">{formatSec(currentTimeInClip)}</span>
-            <span className="text-slate-600"> / </span>
+          <div className="text-xs font-mono tabular-nums text-zinc-400 pl-1.5">
+            <span className="text-zinc-100 font-semibold">{formatSec(currentTimeInClip)}</span>
+            <span className="text-zinc-600"> / </span>
             <span>{formatSec(clipDuration)}</span>
           </div>
         </div>
 
         {/* Loop toggle */}
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setIsLooping(!isLooping)}
-            className={`px-2.5 py-1 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
-              isLooping
-                ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
-                : 'bg-slate-800 text-slate-500 border-slate-700'
-            }`}
-          >
-            Loop {isLooping ? 'On' : 'Off'}
-          </button>
-        </div>
+        <button
+          onClick={() => setIsLooping(!isLooping)}
+          className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md border transition-colors cursor-pointer ${
+            isLooping
+              ? 'bg-zinc-800 text-white border-zinc-700'
+              : 'bg-zinc-950 text-zinc-500 border-zinc-800'
+          }`}
+        >
+          <Repeat className="w-3 h-3" />
+          <span>Loop</span>
+        </button>
       </div>
     </div>
   );

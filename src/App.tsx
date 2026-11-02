@@ -222,7 +222,7 @@ export default function App() {
   const relTimeInClip = Math.max(0, currentTime - activeClip.startTime);
 
   return (
-    <div className="min-h-screen flex flex-col bg-slate-950 text-slate-100 font-sans selection:bg-amber-500 selection:text-black">
+    <div className="min-h-screen flex flex-col bg-zinc-950 text-zinc-100 font-sans selection:bg-violet-500 selection:text-white">
       {/* Header */}
       <Header
         currentVideo={currentVideo}
@@ -235,7 +235,7 @@ export default function App() {
 
       {/* Main Workspace Body */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 flex flex-col min-h-0">
-        {/* Mode 1: Generator Landing (Opus Clip style) */}
+        {/* Mode 1: Generator Landing */}
         {appMode === 'generator' && (
           <div className="flex-1 flex flex-col justify-center max-w-4xl mx-auto w-full py-4">
             <OpusClipHero
@@ -247,7 +247,7 @@ export default function App() {
           </div>
         )}
 
-        {/* Mode 2: Opus Clip Results Feed (List of generated 9:16 short clips with virality scores) */}
+        {/* Mode 2: Opus Clip Results Feed */}
         {appMode === 'feed' && (
           <div className="space-y-6">
             <OpusClipFeed
@@ -263,22 +263,22 @@ export default function App() {
           </div>
         )}
 
-        {/* Mode 3: Klap Studio Editor (Fine-tune framing, pan, trimmer, captions, and export) */}
+        {/* Mode 3: Studio Editor */}
         {appMode === 'studio' && (
           <div className="space-y-4">
             {/* Back to feed button */}
             <div className="flex items-center justify-between">
               <button
                 onClick={() => setAppMode('feed')}
-                className="flex items-center gap-1.5 text-xs font-bold text-slate-400 hover:text-amber-400 transition-colors cursor-pointer"
+                className="flex items-center gap-1.5 text-xs font-medium text-zinc-400 hover:text-white transition-colors cursor-pointer"
               >
                 <ArrowLeft className="w-4 h-4" />
                 <span>Back to All Clips ({currentVideo.highlights.length})</span>
               </button>
 
-              <div className="text-xs text-slate-400 flex items-center gap-2">
-                <span className="font-semibold text-slate-200">Active Clip:</span>
-                <span className="text-amber-400 font-bold">{activeClip.title}</span>
+              <div className="text-xs text-zinc-400 flex items-center gap-2">
+                <span>Active Clip:</span>
+                <span className="text-zinc-200 font-semibold">{activeClip.title}</span>
               </div>
             </div>
 
@@ -328,13 +328,13 @@ export default function App() {
 
               {/* Right Column: Style & Script Tabs (3.5 cols) */}
               <section className="lg:col-span-4 h-[550px] lg:h-[calc(100vh-170px)] flex flex-col space-y-3 min-h-0">
-                <div className="flex p-1 bg-slate-900 border border-slate-800 rounded-xl shrink-0">
+                <div className="flex p-0.5 bg-zinc-900 border border-zinc-800 rounded-lg shrink-0">
                   <button
                     onClick={() => setRightPanelTab('style')}
-                    className={`flex-1 py-1.5 px-3 text-xs font-semibold rounded-lg flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                    className={`flex-1 py-1.5 px-3 text-xs font-medium rounded-md flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
                       rightPanelTab === 'style'
-                        ? 'bg-amber-500 text-slate-950 font-bold shadow-sm'
-                        : 'text-slate-400 hover:text-slate-200'
+                        ? 'bg-zinc-800 text-white font-semibold shadow-sm'
+                        : 'text-zinc-400 hover:text-zinc-200'
                     }`}
                   >
                     <Sliders className="w-3.5 h-3.5" />
@@ -343,14 +343,14 @@ export default function App() {
 
                   <button
                     onClick={() => setRightPanelTab('transcript')}
-                    className={`flex-1 py-1.5 px-3 text-xs font-semibold rounded-lg flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                    className={`flex-1 py-1.5 px-3 text-xs font-medium rounded-md flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
                       rightPanelTab === 'transcript'
-                        ? 'bg-amber-500 text-slate-950 font-bold shadow-sm'
-                        : 'text-slate-400 hover:text-slate-200'
+                        ? 'bg-zinc-800 text-white font-semibold shadow-sm'
+                        : 'text-zinc-400 hover:text-zinc-200'
                     }`}
                   >
                     <FileText className="w-3.5 h-3.5" />
-                    <span>Word Script ({activeClip.captions.length})</span>
+                    <span>Dialogue ({activeClip.captions.length})</span>
                   </button>
                 </div>
 
@@ -410,8 +410,8 @@ export default function App() {
 
       {/* Notification Toast */}
       {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 flex items-center gap-2.5 px-4 py-3 rounded-2xl bg-slate-900 border border-amber-500/50 shadow-2xl shadow-black text-xs font-semibold text-slate-100 animate-in slide-in-from-bottom duration-200">
-          <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
+        <div className="fixed bottom-6 right-6 z-50 flex items-center gap-2.5 px-4 py-2.5 rounded-xl bg-zinc-900 border border-zinc-800 shadow-2xl text-xs font-medium text-zinc-100 animate-in slide-in-from-bottom duration-200">
+          <Sparkles className="w-4 h-4 text-violet-400 shrink-0" />
           <span>{toastMessage}</span>
         </div>
       )}

@@ -3,13 +3,12 @@ import {
   X,
   Download,
   CheckCircle2,
-  Share2,
   FileText,
   Copy,
   Sparkles,
   Smartphone,
   Check,
-  Video,
+  Film,
 } from 'lucide-react';
 import { ClipHighlight, ExportSettings, VideoSource } from '../types';
 import { exportVerticalVideo, generateSrtFile, downloadBlob } from '../utils/exportVideo';
@@ -89,7 +88,6 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       downloadBlob(blob, data.filename || `clipforge_${activeClip.id}.mp4`);
     } catch (err: any) {
       console.warn('Fast export fallback to canvas render:', err);
-      // Fallback to studio export
       handleStudioExport();
     }
   };
@@ -102,7 +100,6 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     setDownloadUrl(null);
 
     try {
-      // Use existing video element or create standalone element
       let videoToUse = videoRef.current;
       if (!videoToUse || videoToUse.readyState < 2) {
         videoToUse = document.createElement('video');
@@ -165,7 +162,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     downloadBlob(blob, `${activeClip.id}_captions.srt`);
   };
 
-  const socialCaptionText = `${activeClip.title}\n\n"${activeClip.hook}"\n\n${activeClip.hashtags.join(' ')} #fyp #viral #trending #shorts`;
+  const socialCaptionText = `${activeClip.title}\n\n"${activeClip.hook}"\n\n${activeClip.hashtags.join(' ')} #shorts #viral #reels #tiktok`;
 
   const handleCopyCaption = () => {
     navigator.clipboard.writeText(socialCaptionText);
@@ -174,182 +171,175 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-in fade-in duration-200">
-      <div className="relative w-full max-w-xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl shadow-black/80 overflow-hidden flex flex-col max-h-[90vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+      <div className="relative w-full max-w-lg bg-zinc-900 border border-zinc-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-950/40">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800 bg-zinc-950/60">
           <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-xl bg-amber-500/10 text-amber-400 border border-amber-500/20">
-              <Smartphone className="w-5 h-5" />
-            </div>
+            <Smartphone className="w-5 h-5 text-violet-400" />
             <div>
-              <h3 className="font-bold text-slate-100 text-base">Export 9:16 Vertical Video</h3>
-              <p className="text-xs text-slate-400">Directly optimized for TikTok, Reels, and YouTube Shorts</p>
+              <h3 className="font-semibold text-zinc-100 text-sm">Export 9:16 Vertical Video</h3>
+              <p className="text-xs text-zinc-500">Optimized for TikTok, Reels & Shorts</p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+            className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors cursor-pointer"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
 
         {/* Body */}
         <div className="p-6 overflow-y-auto space-y-5">
           {/* Platform Presets */}
-          <div>
-            <label className="block text-xs font-semibold text-slate-300 mb-2">
-              Destination Platform
+          <div className="space-y-2">
+            <label className="block text-xs font-medium text-zinc-300">
+              Platform Format
             </label>
             <div className="grid grid-cols-3 gap-2">
               {[
-                { id: 'tiktok', name: 'TikTok', icon: '🎵', tag: '9:16 · High Virality' },
-                { id: 'reels', name: 'Instagram Reels', icon: '📸', tag: '9:16 · Safe Margins' },
-                { id: 'shorts', name: 'YouTube Shorts', icon: '🔴', tag: '9:16 · HD 60fps' },
+                { id: 'tiktok', name: 'TikTok', tag: '9:16 · High Virality' },
+                { id: 'reels', name: 'Instagram', tag: '9:16 · Reels Format' },
+                { id: 'shorts', name: 'Shorts', tag: '9:16 · 60fps HD' },
               ].map((p) => (
                 <button
                   key={p.id}
                   onClick={() => setSelectedPlatform(p.id as any)}
-                  className={`p-3 rounded-xl border text-left transition-all cursor-pointer ${
+                  className={`p-3 rounded-xl border text-left transition-colors cursor-pointer ${
                     selectedPlatform === p.id
-                      ? 'bg-amber-500/10 border-amber-500 ring-1 ring-amber-500/30 text-white'
-                      : 'bg-slate-950/40 border-slate-800 hover:border-slate-700 text-slate-400'
+                      ? 'bg-zinc-800 border-violet-500 text-white ring-1 ring-violet-500/30'
+                      : 'bg-zinc-950/60 border-zinc-800 hover:border-zinc-700 text-zinc-400'
                   }`}
                 >
-                  <div className="text-base mb-1">{p.icon}</div>
-                  <div className="text-xs font-bold text-slate-200">{p.name}</div>
-                  <div className="text-[10px] text-slate-400">{p.tag}</div>
+                  <div className="text-xs font-semibold text-zinc-200">{p.name}</div>
+                  <div className="text-[10px] text-zinc-500 font-mono mt-0.5">{p.tag}</div>
                 </button>
               ))}
             </div>
           </div>
 
-          {/* Export Resolution & Framerate */}
+          {/* Resolution & Framerate */}
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+              <label className="block text-xs font-medium text-zinc-300 mb-1.5">
                 Resolution
               </label>
               <select
                 value={resolution}
                 onChange={(e) => setResolution(e.target.value as any)}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-amber-500 cursor-pointer"
+                className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-xs text-zinc-200 focus:outline-none focus:border-violet-500 cursor-pointer"
               >
-                <option value="1080p">1080 x 1920 (Full HD 9:16)</option>
-                <option value="720p">720 x 1280 (Fast HD 9:16)</option>
+                <option value="1080p">1080 x 1920 (Full HD)</option>
+                <option value="720p">720 x 1280 (Fast 720p)</option>
               </select>
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+              <label className="block text-xs font-medium text-zinc-300 mb-1.5">
                 Framerate
               </label>
               <select
                 value={framerate}
                 onChange={(e) => setFramerate(Number(e.target.value) as any)}
-                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-200 focus:outline-none focus:border-amber-500 cursor-pointer"
+                className="w-full px-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-xs text-zinc-200 focus:outline-none focus:border-violet-500 cursor-pointer"
               >
                 <option value={30}>30 FPS (Standard)</option>
-                <option value={60}>60 FPS (Ultra Smooth)</option>
+                <option value={60}>60 FPS (Smooth)</option>
               </select>
             </div>
           </div>
 
-          {/* Clip Summary Card */}
-          <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800 space-y-1.5">
-            <div className="flex items-center justify-between text-xs text-slate-400">
-              <span className="font-semibold text-slate-300">Target Clip:</span>
-              <span className="font-mono text-amber-400 font-bold">{clipDuration}s duration</span>
+          {/* Clip Summary */}
+          <div className="p-3.5 rounded-xl bg-zinc-950 border border-zinc-800 space-y-1">
+            <div className="flex items-center justify-between text-xs text-zinc-400 font-mono">
+              <span>{clipDuration}s duration</span>
+              <span className="text-emerald-400">{activeClip.viralityScore}% score</span>
             </div>
-            <p className="text-xs font-bold text-slate-200 line-clamp-1">{activeClip.title}</p>
-            <p className="text-[11px] text-slate-400 line-clamp-1">Hook: "{activeClip.hook}"</p>
+            <p className="text-xs font-medium text-zinc-200 line-clamp-1">{activeClip.title}</p>
           </div>
 
-          {/* Live Export Progress or Actions */}
+          {/* Export Action / Progress */}
           {isExporting ? (
-            <div className="p-5 rounded-xl bg-slate-950/80 border border-amber-500/30 space-y-3">
+            <div className="p-5 rounded-xl bg-zinc-950 border border-zinc-800 space-y-3">
               <div className="flex items-center justify-between text-xs">
-                <span className="font-bold text-slate-200 flex items-center gap-1.5">
-                  <Sparkles className="w-4 h-4 text-amber-400 animate-spin" />
+                <span className="text-zinc-300 flex items-center gap-2">
+                  <Sparkles className="w-3.5 h-3.5 text-violet-400 animate-spin" />
                   <span>{exportStatusText}</span>
                 </span>
-                <span className="font-mono text-amber-400 font-black">{exportProgress}%</span>
+                <span className="font-mono text-violet-400 font-semibold tabular-nums">{exportProgress}%</span>
               </div>
-              <div className="w-full h-3 bg-slate-800 rounded-full overflow-hidden">
+              <div className="w-full h-2 bg-zinc-800 rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-gradient-to-r from-amber-500 to-orange-500 rounded-full transition-all duration-200 shadow-md shadow-amber-500/50"
+                  className="h-full bg-violet-600 rounded-full transition-all duration-200"
                   style={{ width: `${exportProgress}%` }}
                 />
               </div>
-              <p className="text-[11px] text-slate-400 text-center">
-                Rendering 9:16 vertical frames and burning animated subtitles with synchronized audio...
-              </p>
             </div>
           ) : downloadUrl ? (
-            <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 space-y-3">
-              <div className="flex items-center gap-2 text-emerald-400 font-bold text-xs">
+            <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20 space-y-3">
+              <div className="flex items-center gap-2 text-emerald-400 font-medium text-xs">
                 <CheckCircle2 className="w-4 h-4" />
-                <span>Export Complete! Your TikTok video is ready.</span>
+                <span>Export ready for download</span>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <div className="grid grid-cols-2 gap-2">
                 <button
                   onClick={handleDownloadVideo}
-                  className="py-2.5 px-3 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20 cursor-pointer transition-all"
+                  className="py-2 px-3 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-lg text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
                 >
-                  <Download className="w-4 h-4 stroke-[2.5]" />
-                  <span>Download 9:16 Video</span>
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download MP4</span>
                 </button>
 
                 <button
                   onClick={handleDownloadSrt}
-                  className="py-2.5 px-3 bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold rounded-xl text-xs flex items-center justify-center gap-2 border border-slate-700 cursor-pointer transition-all"
+                  className="py-2 px-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-medium rounded-lg text-xs flex items-center justify-center gap-1.5 border border-zinc-700 cursor-pointer transition-colors"
                 >
-                  <FileText className="w-4 h-4 text-amber-400" />
-                  <span>Download .SRT Captions</span>
+                  <FileText className="w-3.5 h-3.5" />
+                  <span>.SRT Captions</span>
                 </button>
               </div>
             </div>
           ) : (
-            <div className="space-y-2.5">
+            <div className="space-y-2">
               <button
                 onClick={handleFastClipExport}
-                className="w-full py-3.5 bg-gradient-to-r from-amber-500 via-orange-500 to-amber-500 hover:opacity-95 text-slate-950 font-black rounded-xl text-sm flex items-center justify-center gap-2 shadow-xl shadow-amber-500/25 cursor-pointer transition-all"
+                className="w-full py-2.5 bg-violet-600 hover:bg-violet-500 text-white font-semibold rounded-lg text-xs flex items-center justify-center gap-2 shadow-sm cursor-pointer transition-colors"
               >
-                <Smartphone className="w-4 h-4 stroke-[2.5]" />
-                <span>⚡ Instant Clip 9:16 Video (Fast MP4 Download)</span>
+                <Download className="w-4 h-4" />
+                <span>Instant 9:16 Video Export (MP4)</span>
               </button>
 
               <button
                 onClick={handleStudioExport}
-                className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold rounded-xl text-xs flex items-center justify-center gap-2 border border-slate-700 cursor-pointer transition-all"
+                className="w-full py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-medium rounded-lg text-xs flex items-center justify-center gap-2 border border-zinc-700 cursor-pointer transition-colors"
               >
-                <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                <span>🎨 Burn Animated Subtitles & Export (Studio Render)</span>
+                <Sparkles className="w-3.5 h-3.5 text-violet-400" />
+                <span>Burn Kinetic Subtitles (Studio Render)</span>
               </button>
             </div>
           )}
 
-          {/* Social Copy Section */}
-          <div className="pt-3 border-t border-slate-800 space-y-2">
+          {/* Social Caption Copy */}
+          <div className="pt-3 border-t border-zinc-800 space-y-2">
             <div className="flex items-center justify-between">
-              <label className="text-xs font-semibold text-slate-300">
-                TikTok Title, Description & Hashtags
+              <label className="text-xs font-medium text-zinc-300">
+                Caption & Hashtags
               </label>
               <button
                 onClick={handleCopyCaption}
-                className="flex items-center gap-1 text-[11px] font-semibold text-amber-400 hover:text-amber-300 transition-colors cursor-pointer"
+                className="flex items-center gap-1 text-[11px] font-medium text-violet-400 hover:text-violet-300 transition-colors cursor-pointer"
               >
-                {copiedCaption ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                <span>{copiedCaption ? 'Copied to Clipboard!' : 'Copy All'}</span>
+                {copiedCaption ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                <span>{copiedCaption ? 'Copied' : 'Copy'}</span>
               </button>
             </div>
             <textarea
               readOnly
               value={socialCaptionText}
-              rows={3}
-              className="w-full p-2.5 bg-slate-950 border border-slate-800 rounded-xl text-xs text-slate-300 resize-none font-sans"
+              rows={2}
+              className="w-full p-2.5 bg-zinc-950 border border-zinc-800 rounded-lg text-xs text-zinc-300 resize-none font-mono"
             />
           </div>
         </div>

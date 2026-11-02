@@ -3,16 +3,19 @@ import {
   Sparkles,
   Youtube,
   Upload,
+  ArrowRight,
+  Clock,
+  Play,
+  Film,
   Flame,
   Zap,
   Smile,
   BookOpen,
-  ArrowRight,
-  Clock,
-  Play,
   CheckCircle2,
   Sliders,
-  Film,
+  ChevronRight,
+  Layers,
+  FileVideo,
 } from 'lucide-react';
 import { SAMPLE_VIDEOS } from '../data/sampleVideos';
 import { VideoSource } from '../types';
@@ -38,14 +41,14 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
   const [selectedFocus, setSelectedFocus] = useState<string>('all');
   const [targetLength, setTargetLength] = useState<string>('auto');
   const [selectedSample, setSelectedSample] = useState<VideoSource | null>(SAMPLE_VIDEOS[0]);
+  const [isDragOver, setIsDragOver] = useState(false);
 
   const handleSampleClick = (sample: VideoSource) => {
     setSelectedSample(sample);
     setUrlInput(sample.youtubeUrl || '');
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  const handleFileUpload = (file?: File) => {
     if (!file) return;
 
     const objectUrl = URL.createObjectURL(file);
@@ -64,8 +67,8 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
         videoUrl: objectUrl,
         sourceType: 'upload',
         description: `Uploaded file: ${file.name}`,
-        transcript: `[00:00] Creator: Hey everyone! Welcome to today's crazy episode.
-[00:15] Guest: You will not believe what just happened backstage!
+        transcript: `[00:00] Creator: Welcome back everyone. Let's break down this insane breakthrough today.
+[00:15] Guest: You will not believe what happened right before we started recording!
 [00:30] Creator: It was the funniest and most shocking moment of the entire week!`,
         highlights: [],
       };
@@ -83,7 +86,6 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
 
     let targetVideo: VideoSource;
 
-    // Check if input matches one of our samples
     const matchedSample = SAMPLE_VIDEOS.find(
       (s) => s.youtubeUrl === urlInput || (urlInput && s.id.includes(urlInput.toLowerCase()))
     );
@@ -91,7 +93,6 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
     if (matchedSample) {
       targetVideo = matchedSample;
     } else if (urlInput.trim()) {
-      // Custom YouTube link
       let videoId = 'custom';
       const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
       const match = urlInput.match(regExp);
@@ -126,230 +127,305 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
     });
   };
 
-  return (
-    <div className="relative w-full rounded-3xl bg-gradient-to-b from-slate-900 via-slate-900/90 to-slate-950 border border-slate-800 p-6 sm:p-8 lg:p-10 shadow-2xl shadow-black overflow-hidden">
-      {/* Background ambient lighting */}
-      <div className="absolute top-0 right-1/4 -translate-y-1/2 w-96 h-96 bg-amber-500/10 rounded-full blur-3xl pointer-events-none" />
-      <div className="absolute bottom-0 left-1/4 translate-y-1/2 w-96 h-96 bg-orange-600/10 rounded-full blur-3xl pointer-events-none" />
+  const handlePaste = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) {
+        setUrlInput(text);
+      }
+    } catch {
+      // ignore clipboard permission error
+    }
+  };
 
-      {isProcessing ? (
-        /* Opus Clip Style AI Processing Radar Pipeline */
-        <div className="max-w-xl mx-auto py-8 text-center space-y-6 animate-in fade-in duration-300">
-          <div className="relative w-24 h-24 mx-auto flex items-center justify-center">
-            {/* Spinning radar rings */}
-            <div className="absolute inset-0 rounded-full border-2 border-amber-500/20 animate-ping" />
-            <div className="absolute inset-1 rounded-full border-2 border-dashed border-amber-500/60 animate-spin" />
-            <div className="w-16 h-16 rounded-full bg-amber-500/10 border border-amber-500 flex items-center justify-center shadow-lg shadow-amber-500/30">
-              <Sparkles className="w-8 h-8 text-amber-400 animate-pulse" />
+  const formatDuration = (sec: number) => {
+    const mins = Math.floor(sec / 60);
+    const rem = sec % 60;
+    return `${mins}:${String(rem).padStart(2, '0')}`;
+  };
+
+  if (isProcessing) {
+    return (
+      <div className="w-full max-w-2xl mx-auto py-12 px-6">
+        <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-8 sm:p-10 shadow-2xl space-y-8">
+          <div className="text-center space-y-2">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-violet-500/10 border border-violet-500/20 text-violet-400 text-xs font-medium">
+              <Sparkles className="w-3.5 h-3.5 animate-pulse" />
+              <span>AI Video Analysis Engine</span>
             </div>
-          </div>
-
-          <div className="space-y-2">
-            <h3 className="text-xl sm:text-2xl font-black text-white">
-              Generating Viral Clips with Gemini AI...
-            </h3>
-            <p className="text-sm font-semibold text-amber-400">
-              {processingStep}
+            <h2 className="text-xl sm:text-2xl font-semibold text-zinc-100">
+              Generating High-Retention Clips
+            </h2>
+            <p className="text-xs sm:text-sm text-zinc-400 max-w-md mx-auto">
+              Scanning dialogue cadence, emotional hooks, and reframing to 9:16 vertical format.
             </p>
           </div>
 
-          {/* Progress Bar */}
-          <div className="space-y-2 max-w-md mx-auto">
-            <div className="w-full h-3 bg-slate-950 rounded-full overflow-hidden p-0.5 border border-slate-800">
+          {/* Progress bar */}
+          <div className="space-y-2">
+            <div className="flex justify-between items-center text-xs font-mono">
+              <span className="text-zinc-400 truncate max-w-sm">{processingStep}</span>
+              <span className="text-violet-400 font-semibold tabular-nums">{processingProgress}%</span>
+            </div>
+            <div className="w-full h-2 rounded-full bg-zinc-800 overflow-hidden">
               <div
-                className="h-full bg-gradient-to-r from-amber-500 via-orange-500 to-amber-400 rounded-full transition-all duration-300 shadow-md shadow-amber-500/50"
+                className="h-full bg-gradient-to-r from-violet-600 to-indigo-500 rounded-full transition-all duration-300 ease-out"
                 style={{ width: `${processingProgress}%` }}
               />
             </div>
-            <div className="flex justify-between text-xs font-mono text-slate-400">
-              <span>Opus Virality Engine</span>
-              <span className="text-amber-400 font-bold">{processingProgress}% Complete</span>
-            </div>
           </div>
 
-          {/* 4 Pipeline Steps */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-left pt-4 max-w-lg mx-auto">
+          {/* Steps checklist */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
             {[
-              { label: 'Audio Extract', done: processingProgress >= 25 },
-              { label: 'Dialogue Transcript', done: processingProgress >= 50 },
-              { label: 'Virality Scoring', done: processingProgress >= 75 },
-              { label: '9:16 Vertical Crop', done: processingProgress >= 95 },
+              { label: 'Transcript & Audio Cadence', done: processingProgress >= 30 },
+              { label: 'Gemini Viral Hook Detection', done: processingProgress >= 60 },
+              { label: 'Auto 9:16 Vertical Cropping', done: processingProgress >= 85 },
+              { label: 'Kinetic Subtitle Synchronization', done: processingProgress >= 95 },
             ].map((step, idx) => (
               <div
                 key={idx}
-                className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
+                className={`flex items-center gap-2.5 p-3 rounded-lg border text-xs transition-colors ${
                   step.done
-                    ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300'
-                    : 'bg-slate-950/40 border-slate-800 text-slate-400'
+                    ? 'bg-zinc-800/70 border-zinc-700/80 text-zinc-200'
+                    : 'bg-zinc-950/40 border-zinc-800/60 text-zinc-500'
                 }`}
               >
-                <CheckCircle2
-                  className={`w-3.5 h-3.5 ${step.done ? 'text-emerald-400' : 'text-slate-400'}`}
-                />
+                <div
+                  className={`w-4 h-4 rounded-full flex items-center justify-center shrink-0 ${
+                    step.done ? 'bg-violet-600 text-white' : 'bg-zinc-800 text-zinc-500'
+                  }`}
+                >
+                  {step.done ? (
+                    <CheckCircle2 className="w-3 h-3" />
+                  ) : (
+                    <div className="w-1.5 h-1.5 rounded-full bg-zinc-600" />
+                  )}
+                </div>
                 <span className="truncate">{step.label}</span>
               </div>
             ))}
           </div>
-
-          <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800/80 text-xs text-slate-400 max-w-md mx-auto">
-            💡 <span className="text-slate-300 font-medium">Opus Clip Pro-Tip:</span> Clips with bouncy Hormozi captions and strong 3-second opening hooks achieve up to 300% higher completion rate on TikTok and Shorts.
-          </div>
         </div>
-      ) : (
-        /* Main Hero Generator Form */
-        <div className="max-w-4xl mx-auto space-y-6">
-          {/* Header */}
-          <div className="text-center space-y-3">
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-bold tracking-wide">
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>OPUSCLIP & KLAP.AI CLIPPING ENGINE</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="w-full space-y-8 py-4 sm:py-6">
+      {/* Hero Headline */}
+      <div className="text-center space-y-3 max-w-2xl mx-auto">
+        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-zinc-400 text-xs font-medium">
+          <Sparkles className="w-3.5 h-3.5 text-violet-400" />
+          <span>Automated 9:16 Video Repurposing</span>
+        </div>
+        <h1 className="text-3xl sm:text-4xl lg:text-5xl font-bold tracking-tight text-zinc-100">
+          Turn long videos into <br className="hidden sm:inline" />
+          <span className="text-transparent bg-clip-text bg-gradient-to-r from-violet-400 via-indigo-300 to-zinc-200">
+            viral short clips
+          </span>
+        </h1>
+        <p className="text-sm sm:text-base text-zinc-400 max-w-xl mx-auto leading-relaxed">
+          AI detects punchlines, emotional hooks, and top moments. Automatically crops to 9:16 with animated kinetic captions for TikTok, Reels & Shorts.
+        </p>
+      </div>
+
+      {/* Main Ingest Deck */}
+      <div className="max-w-3xl mx-auto bg-zinc-900/80 border border-zinc-800/90 rounded-2xl p-6 sm:p-8 shadow-xl space-y-6">
+        {/* Input Form */}
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-zinc-300 flex items-center justify-between">
+              <span>YouTube Video URL</span>
+              <button
+                type="button"
+                onClick={handlePaste}
+                className="text-[11px] text-violet-400 hover:text-violet-300 cursor-pointer transition-colors"
+              >
+                Paste from clipboard
+              </button>
+            </label>
+            <div className="relative flex items-center">
+              <div className="absolute left-3.5 text-zinc-500">
+                <Youtube className="w-5 h-5 text-red-500" />
+              </div>
+              <input
+                type="url"
+                value={urlInput}
+                onChange={(e) => setUrlInput(e.target.value)}
+                placeholder="https://www.youtube.com/watch?v=..."
+                className="w-full pl-11 pr-32 py-3 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-100 placeholder-zinc-500 text-sm focus:outline-none focus:border-violet-500 transition-colors"
+              />
+              <button
+                type="submit"
+                className="absolute right-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-violet-600 hover:bg-violet-500 text-white shadow-sm transition-all cursor-pointer flex items-center gap-1.5"
+              >
+                <span>Clip Video</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
             </div>
-
-            <h1 className="text-2xl sm:text-4xl lg:text-5xl font-black text-white tracking-tight leading-tight">
-              Turn 1 Long Video Into{' '}
-              <span className="bg-gradient-to-r from-amber-400 via-orange-400 to-rose-400 bg-clip-text text-transparent">
-                Viral Shorts
-              </span>{' '}
-              in 1 Click
-            </h1>
-
-            <p className="text-xs sm:text-sm text-slate-400 max-w-2xl mx-auto leading-relaxed">
-              AI detects funny & peak moments, auto-generates animated TikTok/Hormozi captions, calculates virality scores, and reframes speakers to vertical 9:16 video.
-            </p>
           </div>
 
-          {/* Primary Input Box (Opus Clip Style) */}
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="p-2 sm:p-2.5 rounded-2xl bg-slate-950 border-2 border-slate-800 focus-within:border-amber-500/70 shadow-2xl flex flex-col sm:flex-row items-stretch sm:items-center gap-2 transition-all">
-              <div className="flex-1 flex items-center px-3 gap-3">
-                <Youtube className="w-5 h-5 text-red-500 shrink-0" />
-                <input
-                  type="text"
-                  value={urlInput}
-                  onChange={(e) => setUrlInput(e.target.value)}
-                  placeholder="Paste YouTube link or click a sample video below..."
-                  className="w-full bg-transparent text-slate-100 placeholder:text-slate-500 text-xs sm:text-sm font-medium focus:outline-none py-2"
-                />
+          {/* Secondary Dropzone */}
+          <div
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDragOver(true);
+            }}
+            onDragLeave={() => setIsDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDragOver(false);
+              const file = e.dataTransfer.files?.[0];
+              if (file) handleFileUpload(file);
+            }}
+            className={`border border-dashed rounded-xl p-4 sm:p-5 text-center transition-colors cursor-pointer ${
+              isDragOver
+                ? 'border-violet-500 bg-violet-500/5'
+                : 'border-zinc-800 hover:border-zinc-700 bg-zinc-950/40'
+            }`}
+          >
+            <input
+              type="file"
+              accept="video/mp4,video/quicktime,video/webm"
+              onChange={(e) => handleFileUpload(e.target.files?.[0])}
+              id="file-upload-input"
+              className="hidden"
+            />
+            <label htmlFor="file-upload-input" className="cursor-pointer block space-y-1">
+              <div className="flex items-center justify-center gap-2 text-xs text-zinc-300">
+                <Upload className="w-4 h-4 text-zinc-400" />
+                <span className="font-medium text-violet-400 hover:underline">Upload a local video file</span>
+                <span className="text-zinc-500">or drag and drop</span>
               </div>
+              <p className="text-[11px] text-zinc-500">MP4, MOV, or WebM up to 2GB</p>
+            </label>
+          </div>
+        </form>
 
-              <div className="flex items-center gap-2">
-                <label className="flex items-center gap-1.5 px-3 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold rounded-xl text-xs cursor-pointer border border-slate-700 transition-colors shrink-0">
-                  <Upload className="w-3.5 h-3.5 text-amber-400" />
-                  <span className="hidden sm:inline">Upload File</span>
-                  <input
-                    type="file"
-                    accept="video/mp4,video/webm,video/quicktime"
-                    onChange={handleFileUpload}
-                    className="hidden"
-                  />
-                </label>
-
+        {/* AI Extraction Preferences */}
+        <div className="pt-4 border-t border-zinc-800/80 flex flex-wrap items-center justify-between gap-4">
+          {/* Focus mode */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-zinc-400 font-medium">Moment Focus:</span>
+            <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800">
+              {[
+                { id: 'all', label: 'All Viral' },
+                { id: 'funny', label: 'Humor & Banter' },
+                { id: 'highlight', label: 'Climax' },
+                { id: 'educational', label: 'Insights' },
+              ].map((opt) => (
                 <button
-                  type="submit"
-                  className="w-full sm:w-auto px-6 py-3 bg-gradient-to-r from-amber-500 via-orange-500 to-amber-500 hover:opacity-95 text-slate-950 font-black rounded-xl text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg shadow-amber-500/25 cursor-pointer transition-all shrink-0"
+                  key={opt.id}
+                  onClick={() => setSelectedFocus(opt.id)}
+                  className={`px-2.5 py-1 text-xs rounded-md font-medium transition-colors cursor-pointer ${
+                    selectedFocus === opt.id
+                      ? 'bg-zinc-800 text-white'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
                 >
-                  <Sparkles className="w-4 h-4 fill-slate-950" />
-                  <span>Get Clips in 1 Click</span>
+                  {opt.label}
                 </button>
-              </div>
+              ))}
             </div>
+          </div>
 
-            {/* Quick 1-Click Popular Creator Samples */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-xs text-slate-400">
-                <span className="font-semibold text-slate-300">Or try instant viral creator samples:</span>
-                <span className="text-[11px] text-amber-400 font-medium">1-Click instant test</span>
-              </div>
-
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                {SAMPLE_VIDEOS.map((sample) => {
-                  const isSelected = selectedSample?.id === sample.id;
-                  return (
-                    <button
-                      key={sample.id}
-                      type="button"
-                      onClick={() => handleSampleClick(sample)}
-                      className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between ${
-                        isSelected
-                          ? 'bg-amber-500/10 border-amber-500 text-white ring-1 ring-amber-500/30'
-                          : 'bg-slate-950/40 border-slate-800/80 hover:border-slate-700 text-slate-400'
-                      }`}
-                    >
-                      <div className="flex items-center gap-1.5 mb-1.5">
-                        <div className="w-2 h-2 rounded-full bg-amber-400" />
-                        <span className="text-[11px] font-bold text-slate-200 truncate">
-                          {sample.channelName}
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-slate-300 line-clamp-1 font-medium">
-                        {sample.title}
-                      </p>
-                      <div className="mt-2 flex items-center justify-between text-[10px] text-slate-400">
-                        <span>{sample.highlights.length} clips ready</span>
-                        <span className="text-amber-400 font-bold">Try →</span>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
+          {/* Length mode */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-zinc-400 font-medium">Clip Target:</span>
+            <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800">
+              {[
+                { id: 'auto', label: 'Auto (15-60s)' },
+                { id: '<30s', label: '< 30s' },
+                { id: '30-60s', label: '30-60s' },
+              ].map((len) => (
+                <button
+                  key={len.id}
+                  onClick={() => setTargetLength(len.id)}
+                  className={`px-2.5 py-1 text-xs rounded-md font-medium transition-colors cursor-pointer ${
+                    targetLength === len.id
+                      ? 'bg-zinc-800 text-white'
+                      : 'text-zinc-400 hover:text-zinc-200'
+                  }`}
+                >
+                  {len.label}
+                </button>
+              ))}
             </div>
-
-            {/* Opus Clip Preferences Bar */}
-            <div className="pt-2 flex flex-wrap items-center justify-between gap-3 text-xs bg-slate-950/40 p-3 rounded-2xl border border-slate-800/80">
-              {/* Highlight Focus Filter */}
-              <div className="flex items-center gap-2">
-                <span className="text-slate-400 font-semibold">Highlight Filter:</span>
-                <div className="flex items-center gap-1">
-                  {[
-                    { id: 'all', label: '🔥 All Peaks' },
-                    { id: 'funny', label: '😂 Funny & Roast' },
-                    { id: 'highlight', label: '⚡ Climax' },
-                    { id: 'educational', label: '🧠 Knowledge' },
-                  ].map((cat) => (
-                    <button
-                      key={cat.id}
-                      type="button"
-                      onClick={() => setSelectedFocus(cat.id)}
-                      className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer ${
-                        selectedFocus === cat.id
-                          ? 'bg-amber-500 text-slate-950 font-bold'
-                          : 'bg-slate-900 text-slate-400 hover:text-slate-200'
-                      }`}
-                    >
-                      {cat.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Target duration */}
-              <div className="flex items-center gap-2">
-                <span className="text-slate-400 font-semibold">Clip Length:</span>
-                <div className="flex items-center gap-1">
-                  {[
-                    { id: 'auto', label: 'Auto (Best)' },
-                    { id: 'short', label: '< 30s' },
-                    { id: 'medium', label: '30s - 60s' },
-                  ].map((dur) => (
-                    <button
-                      key={dur.id}
-                      type="button"
-                      onClick={() => setTargetLength(dur.id)}
-                      className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors cursor-pointer ${
-                        targetLength === dur.id
-                          ? 'bg-slate-800 text-amber-400 border border-amber-500/30'
-                          : 'bg-slate-900 text-slate-400 hover:text-slate-200'
-                      }`}
-                    >
-                      {dur.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </form>
+          </div>
         </div>
-      )}
+      </div>
+
+      {/* Benchmark Demo Library */}
+      <div className="max-w-4xl mx-auto space-y-3 pt-2">
+        <div className="flex items-center justify-between">
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
+            Or try with sample episodes
+          </h3>
+          <span className="text-xs text-zinc-500">Ready to clip instantly</span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
+          {SAMPLE_VIDEOS.map((sample) => {
+            const isSelected = selectedSample?.id === sample.id;
+            return (
+              <div
+                key={sample.id}
+                onClick={() => handleSampleClick(sample)}
+                className={`group text-left p-3.5 rounded-xl border transition-all cursor-pointer flex flex-col justify-between ${
+                  isSelected
+                    ? 'bg-zinc-800/90 border-violet-500/50 shadow-md ring-1 ring-violet-500/30'
+                    : 'bg-zinc-900/60 hover:bg-zinc-800/60 border-zinc-800/80'
+                }`}
+              >
+                <div className="space-y-2.5">
+                  <div className="relative aspect-video rounded-lg overflow-hidden bg-zinc-950">
+                    <img
+                      src={sample.thumbnail}
+                      alt={sample.title}
+                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                    />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />
+                    <span className="absolute bottom-2 right-2 text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-black/80 text-zinc-200">
+                      {formatDuration(sample.duration)}
+                    </span>
+                  </div>
+
+                  <div>
+                    <h4 className="text-xs font-semibold text-zinc-200 line-clamp-2 group-hover:text-violet-300 transition-colors">
+                      {sample.title}
+                    </h4>
+                    <p className="text-[11px] text-zinc-500 mt-0.5">
+                      {sample.channelName}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="pt-3 mt-2 border-t border-zinc-800/60 flex items-center justify-between text-xs">
+                  <span className="text-[11px] font-mono text-zinc-400">
+                    {sample.highlights.length} viral hooks detected
+                  </span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onGenerateClips({
+                        videoSource: sample,
+                        focusCategory: selectedFocus,
+                        targetLength,
+                      });
+                    }}
+                    className="text-xs font-semibold text-violet-400 hover:text-violet-300 flex items-center gap-1 cursor-pointer"
+                  >
+                    <span>Clip this</span>
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 };

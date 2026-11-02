@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Youtube, Upload, Film, Sparkles, CheckCircle2, ArrowRight } from 'lucide-react';
+import { X, Youtube, Upload, Film, Sparkles, ArrowRight } from 'lucide-react';
 import { SAMPLE_VIDEOS } from '../data/sampleVideos';
 import { VideoSource } from '../types';
 
@@ -49,14 +49,14 @@ export const VideoImportModal: React.FC<VideoImportModalProps> = ({
         videoUrl: objectUrl,
         sourceType: 'upload',
         description: `Locally uploaded video file: ${file.name}`,
-        transcript: customTranscript || `[00:00] Creator: Hey everyone! Welcome back. Today we're diving straight into this crazy topic.
+        transcript: customTranscript || `[00:00] Creator: Welcome back everyone. Let's break down this crazy event today.
 [00:15] Co-host: No way, did that really happen?!
 [00:25] Creator: Absolutely, and wait till you see what happens next!
 [00:45] Co-host: That is the funniest thing I have seen all month!`,
         highlights: [
           {
             id: `clip-custom-1`,
-            title: `🔥 Top Viral Highlight - ${file.name}`,
+            title: `Viral Highlight - ${file.name}`,
             hook: `You won't believe what happens next! 😱`,
             reason: 'High energy opening with strong retention curiosity.',
             category: 'highlight',
@@ -96,7 +96,6 @@ export const VideoImportModal: React.FC<VideoImportModalProps> = ({
 
     setIsLoading(true);
 
-    // Extract video ID
     let videoId = 'sample';
     const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
     const match = youtubeUrl.match(regExp);
@@ -104,7 +103,6 @@ export const VideoImportModal: React.FC<VideoImportModalProps> = ({
       videoId = match[2];
     }
 
-    // Match sample or create new YouTube source with rich highlight analysis
     setTimeout(() => {
       setIsLoading(false);
       const newSource: VideoSource = {
@@ -128,47 +126,45 @@ export const VideoImportModal: React.FC<VideoImportModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="relative w-full max-w-2xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl shadow-black/80 overflow-hidden flex flex-col max-h-[90vh]">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
+      <div className="relative w-full max-w-2xl bg-zinc-900 border border-zinc-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-950/40">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800 bg-zinc-950/60">
           <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-xl bg-amber-500/10 text-amber-400 border border-amber-500/20">
-              <Film className="w-5 h-5" />
-            </div>
+            <Film className="w-5 h-5 text-violet-400" />
             <div>
-              <h3 className="font-bold text-slate-100 text-base">Import Source Video</h3>
-              <p className="text-xs text-slate-400">Load long-form videos to extract viral clips and highlights</p>
+              <h3 className="font-semibold text-zinc-100 text-sm">Import Source Video</h3>
+              <p className="text-xs text-zinc-500">Load long-form videos to extract viral clips</p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+            className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors cursor-pointer"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
 
         {/* Tab selection */}
-        <div className="flex border-b border-slate-800 bg-slate-950/20 p-2 gap-2">
+        <div className="flex border-b border-zinc-800 bg-zinc-950/40 p-1.5 gap-1.5">
           <button
             onClick={() => setActiveTab('sample')}
-            className={`flex-1 py-2 px-3 text-xs font-semibold rounded-xl flex items-center justify-center gap-2 transition-all cursor-pointer ${
+            className={`flex-1 py-1.5 px-3 text-xs font-medium rounded-lg flex items-center justify-center gap-2 transition-colors cursor-pointer ${
               activeTab === 'sample'
-                ? 'bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-500/20'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                ? 'bg-zinc-800 text-white font-semibold'
+                : 'text-zinc-400 hover:text-zinc-200'
             }`}
           >
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>Viral Sample Library (Instant)</span>
+            <Sparkles className="w-3.5 h-3.5 text-violet-400" />
+            <span>Sample Library</span>
           </button>
 
           <button
             onClick={() => setActiveTab('youtube')}
-            className={`flex-1 py-2 px-3 text-xs font-semibold rounded-xl flex items-center justify-center gap-2 transition-all cursor-pointer ${
+            className={`flex-1 py-1.5 px-3 text-xs font-medium rounded-lg flex items-center justify-center gap-2 transition-colors cursor-pointer ${
               activeTab === 'youtube'
-                ? 'bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-500/20'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                ? 'bg-zinc-800 text-white font-semibold'
+                : 'text-zinc-400 hover:text-zinc-200'
             }`}
           >
             <Youtube className="w-3.5 h-3.5 text-red-500" />
@@ -177,10 +173,10 @@ export const VideoImportModal: React.FC<VideoImportModalProps> = ({
 
           <button
             onClick={() => setActiveTab('upload')}
-            className={`flex-1 py-2 px-3 text-xs font-semibold rounded-xl flex items-center justify-center gap-2 transition-all cursor-pointer ${
+            className={`flex-1 py-1.5 px-3 text-xs font-medium rounded-lg flex items-center justify-center gap-2 transition-colors cursor-pointer ${
               activeTab === 'upload'
-                ? 'bg-amber-500 text-slate-950 font-bold shadow-md shadow-amber-500/20'
-                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                ? 'bg-zinc-800 text-white font-semibold'
+                : 'text-zinc-400 hover:text-zinc-200'
             }`}
           >
             <Upload className="w-3.5 h-3.5" />
@@ -192,43 +188,36 @@ export const VideoImportModal: React.FC<VideoImportModalProps> = ({
         <div className="p-6 overflow-y-auto space-y-4">
           {activeTab === 'sample' && (
             <div className="space-y-3">
-              <p className="text-xs text-slate-400">
-                Choose a pre-configured viral long-form video with high-energy dialogue, humor, and pre-analyzed highlights:
+              <p className="text-xs text-zinc-400">
+                Choose a pre-configured viral episode with high-energy dialogue and pre-analyzed highlights:
               </p>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {SAMPLE_VIDEOS.map((video) => (
                   <div
                     key={video.id}
                     onClick={() => handleSelectSample(video)}
-                    className="group relative p-3 rounded-xl bg-slate-800/40 hover:bg-slate-800 border border-slate-700/60 hover:border-amber-500/50 transition-all cursor-pointer flex flex-col justify-between overflow-hidden"
+                    className="p-3 rounded-xl bg-zinc-950/60 hover:bg-zinc-800/60 border border-zinc-800 hover:border-zinc-700 transition-colors cursor-pointer flex flex-col justify-between"
                   >
                     <div className="space-y-2">
-                      <div className="relative aspect-video rounded-lg overflow-hidden bg-slate-950">
+                      <div className="relative aspect-video rounded-lg overflow-hidden bg-zinc-950">
                         <img
                           src={video.thumbnail}
                           alt={video.title}
-                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                          className="w-full h-full object-cover"
                         />
-                        <div className="absolute bottom-1.5 right-1.5 px-1.5 py-0.5 rounded bg-black/80 text-[10px] font-mono text-white">
+                        <div className="absolute bottom-1.5 right-1.5 px-1.5 py-0.5 rounded bg-black/80 text-[10px] font-mono tabular-nums text-zinc-300">
                           {Math.floor(video.duration / 60)}:
                           {String(video.duration % 60).padStart(2, '0')}
                         </div>
-                        <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 rounded bg-amber-500/90 text-slate-950 text-[10px] font-bold">
-                          {video.highlights.length} Viral Clips
-                        </div>
                       </div>
                       <div>
-                        <h4 className="text-xs font-bold text-slate-200 group-hover:text-amber-400 transition-colors line-clamp-2">
+                        <h4 className="text-xs font-semibold text-zinc-200 line-clamp-1">
                           {video.title}
                         </h4>
-                        <p className="text-[11px] text-slate-400 truncate mt-0.5">
-                          {video.channelName}
+                        <p className="text-[11px] text-zinc-500 line-clamp-1 mt-0.5">
+                          {video.channelName} · {video.highlights.length} viral clips
                         </p>
                       </div>
-                    </div>
-                    <div className="mt-3 pt-2 border-t border-slate-700/50 flex items-center justify-between text-[11px] text-amber-400 font-semibold">
-                      <span>Load into Studio</span>
-                      <ArrowRight className="w-3.5 h-3.5 group-hover:translate-x-1 transition-transform" />
                     </div>
                   </div>
                 ))}
@@ -238,92 +227,51 @@ export const VideoImportModal: React.FC<VideoImportModalProps> = ({
 
           {activeTab === 'youtube' && (
             <form onSubmit={handleYoutubeSubmit} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                  YouTube Video Link
-                </label>
-                <div className="relative">
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium text-zinc-300">YouTube Video URL</label>
+                <div className="relative flex items-center">
+                  <div className="absolute left-3 text-zinc-500">
+                    <Youtube className="w-4 h-4 text-red-500" />
+                  </div>
                   <input
                     type="url"
                     value={youtubeUrl}
                     onChange={(e) => setYoutubeUrl(e.target.value)}
                     placeholder="https://www.youtube.com/watch?v=..."
+                    className="w-full pl-9 pr-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-violet-500"
                     required
-                    className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 placeholder:text-slate-500 text-xs focus:outline-none focus:border-amber-500 pr-10"
                   />
-                  <Youtube className="w-4 h-4 text-red-500 absolute right-3.5 top-3" />
                 </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                  Custom Title (Optional)
-                </label>
-                <input
-                  type="text"
-                  value={customTitle}
-                  onChange={(e) => setCustomTitle(e.target.value)}
-                  placeholder="e.g. Crazy Podcast Debate on AI"
-                  className="w-full px-3.5 py-2 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 placeholder:text-slate-500 text-xs focus:outline-none focus:border-amber-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                  Dialogue or Transcript (Optional - Gemini can auto-generate)
-                </label>
-                <textarea
-                  value={customTranscript}
-                  onChange={(e) => setCustomTranscript(e.target.value)}
-                  placeholder="Paste speech lines with timestamps or dialogue here, or leave empty for AI auto-generation..."
-                  rows={4}
-                  className="w-full p-3 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 placeholder:text-slate-500 text-xs focus:outline-none focus:border-amber-500 resize-none font-mono"
-                />
               </div>
 
               <button
                 type="submit"
                 disabled={isLoading}
-                className="w-full py-3 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-amber-500/20 transition-all cursor-pointer disabled:opacity-50"
+                className="w-full py-2.5 bg-violet-600 hover:bg-violet-500 text-white font-medium text-xs rounded-lg transition-colors cursor-pointer disabled:opacity-50 flex items-center justify-center gap-1.5"
               >
-                {isLoading ? (
-                  <Sparkles className="w-4 h-4 animate-spin text-slate-950" />
-                ) : (
-                  <CheckCircle2 className="w-4 h-4" />
-                )}
-                <span>{isLoading ? 'Fetching & Analyzing Video...' : 'Import & Auto-Detect Viral Clips'}</span>
+                <span>{isLoading ? 'Importing Video...' : 'Load & Analyze with Gemini'}</span>
+                <ArrowRight className="w-3.5 h-3.5" />
               </button>
             </form>
           )}
 
           {activeTab === 'upload' && (
             <div className="space-y-4">
-              <div className="border-2 border-dashed border-slate-700 hover:border-amber-500/60 rounded-2xl p-8 text-center transition-colors bg-slate-950/40">
-                <Upload className="w-10 h-10 text-amber-400 mx-auto mb-3" />
-                <h4 className="text-sm font-bold text-slate-200 mb-1">Upload MP4, WebM, or MOV video</h4>
-                <p className="text-xs text-slate-400 mb-4">Drag and drop your long-form video file here</p>
-                <label className="inline-flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold rounded-xl text-xs cursor-pointer border border-slate-600 transition-colors">
-                  <span>Browse Video File</span>
-                  <input
-                    type="file"
-                    accept="video/mp4,video/webm,video/quicktime,video/m4v"
-                    onChange={handleFileUpload}
-                    className="hidden"
-                  />
-                </label>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                  Dialogue/Transcript (Optional)
-                </label>
-                <textarea
-                  value={customTranscript}
-                  onChange={(e) => setCustomTranscript(e.target.value)}
-                  placeholder="Paste dialogue if available, or Gemini will analyze speech automatically..."
-                  rows={3}
-                  className="w-full p-3 bg-slate-950 border border-slate-700 rounded-xl text-slate-200 placeholder:text-slate-500 text-xs focus:outline-none focus:border-amber-500 resize-none font-mono"
+              <div className="border border-dashed border-zinc-800 hover:border-zinc-700 rounded-xl p-8 text-center bg-zinc-950/40 cursor-pointer">
+                <input
+                  type="file"
+                  accept="video/mp4,video/quicktime,video/webm"
+                  onChange={handleFileUpload}
+                  id="modal-upload"
+                  className="hidden"
                 />
+                <label htmlFor="modal-upload" className="cursor-pointer block space-y-2">
+                  <Upload className="w-8 h-8 mx-auto text-zinc-500" />
+                  <div className="text-xs font-medium text-zinc-300">
+                    <span className="text-violet-400">Click to select video</span> or drag and drop
+                  </div>
+                  <p className="text-[11px] text-zinc-500">MP4, MOV, or WebM up to 2GB</p>
+                </label>
               </div>
             </div>
           )}
