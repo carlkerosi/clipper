@@ -7,7 +7,6 @@ import {
   VolumeX,
   Eye,
   MoveHorizontal,
-  Maximize2,
   Repeat,
 } from 'lucide-react';
 import { ClipHighlight, ExportSettings, FramingMode } from '../types';
@@ -15,6 +14,7 @@ import { drawVerticalFrame } from '../utils/captionRenderer';
 
 interface VerticalStudioPreviewProps {
   videoUrl: string;
+  playableSourceUrl?: string;
   youtubeUrl?: string;
   thumbnail?: string;
   activeClip: ClipHighlight;
@@ -24,16 +24,9 @@ interface VerticalStudioPreviewProps {
   onTimeUpdate?: (currentTime: number) => void;
 }
 
-function extractYouTubeId(url?: string): string | null {
-  if (!url) return null;
-  const match = url.match(/^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/);
-  return match && match[2].length === 11 ? match[2] : null;
-}
-
 export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
   videoUrl,
-  youtubeUrl,
-  thumbnail,
+  playableSourceUrl,
   activeClip,
   settings,
   onUpdateSettings,
@@ -47,20 +40,40 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
   const [isMuted, setIsMuted] = useState(false);
   const [showSafeZones, setShowSafeZones] = useState(false);
   const [isLooping, setIsLooping] = useState(true);
+  const [videoError, setVideoError] = useState<string | null>(null);
 
-  const ytId = extractYouTubeId(youtubeUrl || videoUrl);
-  const isYouTube = Boolean(ytId);
+  const directFullSource =
+    playableSourceUrl ||
+    (videoUrl &&
+    !videoUrl.includes('youtube.com') &&
+    !videoUrl.includes('youtu.be')
+      ? videoUrl
+      : '');
+
+  // If full playable source exists, use it so TimelineTrimmer, panX, and all 4 framing modes work 1:1.
+  // Otherwise play the pre-clipped 9:16 MP4 segment (0..clipDuration).
+  const isClipOnlyMode = !directFullSource && Boolean(activeClip.clipVideoUrl);
+  const activeVideoSource =
+    directFullSource || activeClip.clipVideoUrl || '/samples/podcast.mp4';
 
   const clipDuration = Math.max(1, activeClip.endTime - activeClip.startTime);
 
-  // Sync video element time to clip start time reliably
+  // Sync video element time to clip start time cleanly whenever clip or source switches
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
+    setVideoError(null);
+
+    const startPos = isClipOnlyMode ? 0 : activeClip.startTime;
 
     const seekToStart = () => {
-      video.currentTime = activeClip.startTime;
-      setCurrentTimeInClip(0);
+      try {
+        video.currentTime = startPos;
+        setCurrentTimeInClip(0);
+        if (onTimeUpdate) {
+          onTimeUpdate(activeClip.startTime);
+        }
+      } catch {}
     };
 
     if (video.readyState >= 1) {
@@ -69,7 +82,7 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
       video.addEventListener('loadedmetadata', seekToStart, { once: true });
       video.addEventListener('canplay', seekToStart, { once: true });
     }
-  }, [activeClip.id, activeClip.startTime]);
+  }, [activeClip.id, activeClip.startTime, isClipOnlyMode, activeVideoSource]);
 
   // Main Canvas Rendering animation loop
   useEffect(() => {
@@ -84,17 +97,27 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
 
     const render = () => {
       let relTime = 0;
-      if (video) {
-        relTime = Math.max(0, video.currentTime - activeClip.startTime);
+      if (video && video.readyState >= 1) {
+        relTime = isClipOnlyMode
+          ? video.currentTime
+          : Math.max(0, video.currentTime - activeClip.startTime);
+
         setCurrentTimeInClip(relTime);
         if (onTimeUpdate) {
-          onTimeUpdate(video.currentTime);
+          onTimeUpdate(
+            isClipOnlyMode
+              ? activeClip.startTime + video.currentTime
+              : video.currentTime
+          );
         }
 
-        // Loop clip if enabled
-        if (video.currentTime >= activeClip.endTime) {
+        const maxThreshold = isClipOnlyMode
+          ? video.duration || clipDuration
+          : activeClip.endTime;
+
+        if (!video.paused && video.currentTime >= maxThreshold - 0.1) {
           if (isLooping) {
-            video.currentTime = activeClip.startTime;
+            video.currentTime = isClipOnlyMode ? 0 : activeClip.startTime;
             video.play().catch(() => {});
           } else {
             video.pause();
@@ -102,6 +125,8 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
           }
         }
       }
+
+      const useFullCanvasComposite = settings.framingMode !== 'smart_crop';
 
       drawVerticalFrame({
         ctx,
@@ -124,7 +149,7 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
         showProgressBar: settings.showProgressBar,
         progressBarColor: settings.progressBarColor,
         showSafeZones,
-        overlayOnly: true,
+        overlayOnly: !useFullCanvasComposite,
       });
 
       animId = requestAnimationFrame(render);
@@ -138,30 +163,61 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
     showSafeZones,
     isLooping,
     clipDuration,
+    isClipOnlyMode,
     onTimeUpdate,
   ]);
+
+  const ensureLoadedAndPlay = async (startPos: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (video.readyState === 0) {
+      video.load();
+      await new Promise<void>((resolve) => {
+        const onReady = () => {
+          video.removeEventListener('canplay', onReady);
+          video.removeEventListener('loadedmetadata', onReady);
+          resolve();
+        };
+        video.addEventListener('canplay', onReady);
+        video.addEventListener('loadedmetadata', onReady);
+        setTimeout(resolve, 2500);
+      });
+    }
+
+    video.currentTime = startPos;
+    try {
+      video.muted = isMuted;
+      await video.play();
+      setIsPlaying(true);
+    } catch {
+      video.muted = true;
+      setIsMuted(true);
+      try {
+        await video.play();
+        setIsPlaying(true);
+      } catch {
+        setVideoError('Unable to start playback for this video stream.');
+      }
+    }
+  };
 
   const togglePlay = async () => {
     const video = videoRef.current;
     if (!video) return;
 
+    const startPos = isClipOnlyMode ? 0 : activeClip.startTime;
+    const endPos = isClipOnlyMode
+      ? video.duration || clipDuration
+      : activeClip.endTime;
+
     if (video.paused) {
-      if (video.currentTime >= activeClip.endTime || video.currentTime < activeClip.startTime) {
-        video.currentTime = activeClip.startTime;
-      }
-      try {
-        await video.play();
-        setIsPlaying(true);
-      } catch (err) {
-        video.muted = true;
-        setIsMuted(true);
-        try {
-          await video.play();
-          setIsPlaying(true);
-        } catch (err2) {
-          console.error('Play error', err2);
-        }
-      }
+      const targetPos =
+        video.currentTime >= endPos - 0.2 ||
+        (!isClipOnlyMode && video.currentTime < startPos)
+          ? startPos
+          : video.currentTime;
+      await ensureLoadedAndPlay(targetPos);
     } else {
       video.pause();
       setIsPlaying(false);
@@ -169,17 +225,8 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
   };
 
   const restartClip = async () => {
-    const video = videoRef.current;
-    if (!video) return;
-    video.currentTime = activeClip.startTime;
-    try {
-      await video.play();
-      setIsPlaying(true);
-    } catch {
-      video.muted = true;
-      video.play().catch(() => {});
-      setIsPlaying(true);
-    }
+    const startPos = isClipOnlyMode ? 0 : activeClip.startTime;
+    await ensureLoadedAndPlay(startPos);
   };
 
   const toggleMute = () => {
@@ -199,6 +246,8 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
     return `${m}:${String(sec).padStart(2, '0')}`;
   };
 
+  const useCanvasVideoComposite = settings.framingMode !== 'smart_crop';
+
   return (
     <div
       ref={containerRef}
@@ -206,7 +255,6 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
     >
       {/* Top Controls Toolbar */}
       <div className="w-full flex items-center justify-between gap-2 mb-2">
-        {/* Framing mode buttons */}
         <div className="flex items-center gap-1 p-0.5 bg-zinc-950 rounded-lg border border-zinc-800">
           {[
             { id: 'smart_crop', label: 'Smart Crop (9:16)' },
@@ -228,7 +276,6 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
           ))}
         </div>
 
-        {/* Safe zone toggle */}
         <button
           onClick={() => setShowSafeZones(!showSafeZones)}
           className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors cursor-pointer ${
@@ -243,68 +290,51 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
         </button>
       </div>
 
-      {/* Center 9:16 Vertical Video Frame (Studio Phone Mockup) */}
+      {/* Center 9:16 Vertical Video Frame */}
       <div className="relative flex-1 flex items-center justify-center w-full min-h-0 py-1">
         <div className="relative h-full max-h-[540px] aspect-[9/16] rounded-[28px] overflow-hidden bg-black shadow-2xl border-4 border-zinc-800 ring-1 ring-zinc-700/60 flex items-center justify-center group">
-          {/* Subtle phone notch */}
           <div className="absolute top-2 w-20 h-3.5 bg-zinc-900 rounded-full z-30 pointer-events-none opacity-80" />
 
-          {/* Video or YouTube Layer */}
-          {isYouTube && ytId ? (
-            isPlaying ? (
-              <iframe
-                src={`https://www.youtube-nocookie.com/embed/${ytId}?start=${Math.floor(activeClip.startTime)}&end=${Math.ceil(activeClip.endTime)}&autoplay=1&mute=${isMuted ? 1 : 0}&controls=1&modestbranding=1&loop=1&playlist=${ytId}&enablejsapi=1`}
-                title={activeClip.title}
-                className="absolute inset-0 w-full h-full object-cover"
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                allowFullScreen
-              />
-            ) : (
-              <div
-                onClick={() => setIsPlaying(true)}
-                className="absolute inset-0 w-full h-full cursor-pointer flex items-center justify-center bg-black"
-              >
-                <img
-                  src={thumbnail || `https://img.youtube.com/vi/${ytId}/hqdefault.jpg`}
-                  alt={activeClip.title}
-                  className="w-full h-full object-cover opacity-85"
-                />
-              </div>
-            )
-          ) : (
-            <video
-              ref={videoRef}
-              src={videoUrl}
-              playsInline
-              preload="auto"
-              onClick={togglePlay}
-              onPlay={() => setIsPlaying(true)}
-              onPause={() => setIsPlaying(false)}
-              className="absolute inset-0 w-full h-full object-cover select-none cursor-pointer"
-              style={{
-                objectPosition: `${Math.max(0, Math.min(100, (settings.panX + 100) / 2))}% center`,
-              }}
-            />
-          )}
+          {/* Native HTML5 Video Element (visible in Smart Crop, hidden source in canvas composite modes) */}
+          <video
+            ref={videoRef}
+            src={activeVideoSource}
+            playsInline
+            preload="auto"
+            onClick={togglePlay}
+            onPlay={() => setIsPlaying(true)}
+            onPause={() => setIsPlaying(false)}
+            onError={() =>
+              setVideoError('Stream failed to decode. Try re-exporting or picking another moment.')
+            }
+            className={`absolute inset-0 w-full h-full object-cover select-none cursor-pointer ${
+              useCanvasVideoComposite ? 'opacity-0 pointer-events-none' : 'opacity-100'
+            }`}
+            style={{
+              objectPosition: `${Math.max(0, Math.min(100, (settings.panX + 100) / 2))}% center`,
+            }}
+          />
 
-          {/* Canvas Overlay for Animated Subtitles, Hook Banner & Progress Bar */}
+          {/* Canvas Layer: Composite video + Animated Subtitles + Hook Banner + Progress Bar */}
           <canvas
             ref={canvasRef}
             width={720}
             height={1280}
-            className="absolute inset-0 w-full h-full object-cover pointer-events-none z-10"
+            onClick={togglePlay}
+            className={`absolute inset-0 w-full h-full object-cover z-10 ${
+              useCanvasVideoComposite ? 'cursor-pointer pointer-events-auto' : 'pointer-events-none'
+            }`}
           />
 
-          {/* Center Play Button Overlay */}
-          {!isPlaying && (
+          {videoError && (
+            <div className="absolute inset-0 z-30 bg-black/85 flex items-center justify-center p-5 text-center">
+              <p className="text-xs text-rose-300">{videoError}</p>
+            </div>
+          )}
+
+          {!isPlaying && !videoError && (
             <div
-              onClick={() => {
-                if (isYouTube) {
-                  setIsPlaying(true);
-                } else {
-                  togglePlay();
-                }
-              }}
+              onClick={togglePlay}
               className="absolute inset-0 flex items-center justify-center bg-black/30 backdrop-blur-[1px] cursor-pointer z-20"
             >
               <div className="w-14 h-14 rounded-full bg-white text-zinc-950 flex items-center justify-center shadow-xl group-hover:scale-105 transition-transform">
@@ -315,7 +345,7 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
         </div>
       </div>
 
-      {/* Speaker Pan Re-framer (when in Smart Crop mode) */}
+      {/* Speaker Pan Re-framer */}
       {settings.framingMode === 'smart_crop' && (
         <div className="w-full max-w-sm mt-2 px-3 py-1.5 bg-zinc-950 rounded-xl border border-zinc-800 flex items-center gap-2.5">
           <MoveHorizontal className="w-3.5 h-3.5 text-violet-400 shrink-0" />
@@ -368,7 +398,11 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
             className="p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors cursor-pointer"
             title={isMuted ? 'Unmute' : 'Mute'}
           >
-            {isMuted ? <VolumeX className="w-3.5 h-3.5 text-zinc-400" /> : <Volume2 className="w-3.5 h-3.5 text-emerald-400" />}
+            {isMuted ? (
+              <VolumeX className="w-3.5 h-3.5 text-zinc-400" />
+            ) : (
+              <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+            )}
           </button>
 
           <div className="text-xs font-mono tabular-nums text-zinc-400 pl-1.5">
@@ -378,7 +412,6 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
           </div>
         </div>
 
-        {/* Loop toggle */}
         <button
           onClick={() => setIsLooping(!isLooping)}
           className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md border transition-colors cursor-pointer ${

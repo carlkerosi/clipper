@@ -38,10 +38,14 @@ export interface ClipHighlight {
   viralityScore: number; // 0-100
   hookScore?: number;
   flowScore?: number;
+  emotionScore?: number;
+  framingSuggestion?: FramingMode;
   emojis: string[];
   hashtags: string[];
   recommendedMusicTempo?: string;
   captions: CaptionChunk[];
+  clipVideoUrl?: string; // Direct path to pre-clipped 9:16 vertical MP4
+  downloadUrl?: string;
 }
 
 export interface VideoSource {
@@ -52,10 +56,12 @@ export interface VideoSource {
   duration: number; // in seconds
   thumbnail: string;
   videoUrl: string;
+  playableSourceUrl?: string; // Server-hosted playable MP4/WebM path (for uploads, samples, cached YouTube)
   sourceType: 'youtube' | 'upload' | 'sample';
   youtubeUrl?: string;
   description: string;
   transcript: string;
+  aiSummary?: string;
   highlights: ClipHighlight[];
 }
 

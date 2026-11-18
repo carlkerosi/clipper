@@ -57,16 +57,21 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           videoUrl: videoSource.videoUrl,
+          playableSourceUrl: videoSource.playableSourceUrl,
           youtubeUrl: videoSource.youtubeUrl,
           startTime: activeClip.startTime,
           duration: clipDuration,
           resolution,
+          framingMode: settings.framingMode,
+          panX: settings.panX,
           title: activeClip.title,
+          clipId: `${activeClip.id}_exp`,
         }),
       });
 
       if (!response.ok) {
-        throw new Error('Server clipping service returned ' + response.status);
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.error || 'Server clipping service returned ' + response.status);
       }
 
       const data = await response.json();
@@ -100,10 +105,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     setDownloadUrl(null);
 
     try {
+      const fullSrc = videoSource.playableSourceUrl || (videoSource.videoUrl.startsWith('/') ? videoSource.videoUrl : '');
+      const isClipOnly = !fullSrc && Boolean(activeClip.clipVideoUrl);
+
       let videoToUse = videoRef.current;
       if (!videoToUse || videoToUse.readyState < 2) {
         videoToUse = document.createElement('video');
-        videoToUse.src = videoSource.videoUrl;
+        videoToUse.src = fullSrc || activeClip.clipVideoUrl || videoSource.videoUrl;
         videoToUse.crossOrigin = 'anonymous';
         videoToUse.playsInline = true;
         videoToUse.muted = true;
@@ -116,8 +124,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
       const blob = await exportVerticalVideo({
         videoElement: videoToUse,
-        startTime: activeClip.startTime,
-        endTime: activeClip.endTime,
+        startTime: isClipOnly ? 0 : activeClip.startTime,
+        endTime: isClipOnly ? clipDuration : activeClip.endTime,
         resolution,
         framerate,
         framingMode: settings.framingMode,

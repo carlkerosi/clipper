@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Youtube, Upload, Film, Sparkles, ArrowRight } from 'lucide-react';
+import { X, Youtube, Upload, Film, Sparkles, ArrowRight, Loader2 } from 'lucide-react';
 import { SAMPLE_VIDEOS } from '../data/sampleVideos';
 import { VideoSource } from '../types';
 
@@ -21,108 +21,92 @@ export const VideoImportModal: React.FC<VideoImportModalProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
 
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
   if (!isOpen) return null;
 
   const handleSelectSample = (sample: VideoSource) => {
-    onSelectVideo(sample);
+    onSelectVideo({
+      ...sample,
+      playableSourceUrl: sample.videoUrl,
+    });
     onClose();
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    setUploadError(null);
     setUploadedFile(file);
-    const objectUrl = URL.createObjectURL(file);
-    const videoElem = document.createElement('video');
-    videoElem.src = objectUrl;
+    setIsLoading(true);
 
-    videoElem.onloadedmetadata = () => {
-      const duration = Math.round(videoElem.duration) || 120;
+    try {
+      const formData = new FormData();
+      formData.append('video', file);
+
+      const uploadRes = await fetch('/api/upload-video', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await uploadRes.json();
+      if (!uploadRes.ok || !data.playableSourceUrl) {
+        throw new Error(data.error || 'Upload failed');
+      }
+
       const newSource: VideoSource = {
         id: `upload-${Date.now()}`,
         title: file.name.replace(/\.[^/.]+$/, ''),
         creator: 'User Upload',
         channelName: 'My Local Videos',
-        duration,
+        duration: data.duration || 120,
         thumbnail: 'https://images.unsplash.com/photo-1574717024653-61fd2cf4d44d?auto=format&fit=crop&w=1200&q=80',
-        videoUrl: objectUrl,
+        videoUrl: data.playableSourceUrl,
+        playableSourceUrl: data.playableSourceUrl,
         sourceType: 'upload',
-        description: `Locally uploaded video file: ${file.name}`,
-        transcript: customTranscript || `[00:00] Creator: Welcome back everyone. Let's break down this crazy event today.
-[00:15] Co-host: No way, did that really happen?!
-[00:25] Creator: Absolutely, and wait till you see what happens next!
-[00:45] Co-host: That is the funniest thing I have seen all month!`,
-        highlights: [
-          {
-            id: `clip-custom-1`,
-            title: `Viral Highlight - ${file.name}`,
-            hook: `You won't believe what happens next! 😱`,
-            reason: 'High energy opening with strong retention curiosity.',
-            category: 'highlight',
-            startTime: 0,
-            endTime: Math.min(duration, 35),
-            viralityScore: 94,
-            hookScore: 96,
-            flowScore: 92,
-            emojis: ['🔥', '⚡', '👀'],
-            hashtags: ['#viral', '#trending', '#fyp', '#shorts'],
-            captions: [
-              {
-                start: 0,
-                end: 4.5,
-                text: "You won't believe what happens in this clip!",
-                emphasisWord: "BELIEVE",
-                words: [
-                  { w: "You won't", start: 0, end: 1.0 },
-                  { w: "believe", start: 1.0, end: 2.0 },
-                  { w: "what happens", start: 2.0, end: 3.2 },
-                  { w: "in this clip!", start: 3.2, end: 4.5 },
-                ],
-              },
-            ],
-          },
-        ],
-      };
-
-      onSelectVideo(newSource);
-      onClose();
-    };
-  };
-
-  const handleYoutubeSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!youtubeUrl.trim()) return;
-
-    setIsLoading(true);
-
-    let videoId = 'sample';
-    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
-    const match = youtubeUrl.match(regExp);
-    if (match && match[2].length === 11) {
-      videoId = match[2];
-    }
-
-    setTimeout(() => {
-      setIsLoading(false);
-      const newSource: VideoSource = {
-        id: `yt-${videoId}-${Date.now()}`,
-        title: customTitle || `YouTube Video: ${videoId}`,
-        creator: 'YouTube Creator',
-        channelName: 'Trending Channel',
-        duration: 300,
-        thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
-        videoUrl: youtubeUrl,
-        sourceType: 'youtube',
-        youtubeUrl: youtubeUrl,
-        description: `Imported YouTube video URL: ${youtubeUrl}`,
+        description: `Uploaded video file: ${file.name}`,
         transcript: customTranscript || '',
         highlights: [],
       };
 
       onSelectVideo(newSource);
       onClose();
-    }, 600);
+    } catch (err: any) {
+      setUploadError(err.message || 'Could not upload video.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleYoutubeSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!youtubeUrl.trim()) return;
+
+    let videoId = 'custom';
+    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|shorts\/|watch\?v=|&v=)([^#&?]*).*/;
+    const match = youtubeUrl.match(regExp);
+    if (match && match[2].length === 11) {
+      videoId = match[2];
+    }
+
+    const newSource: VideoSource = {
+      id: `yt-${videoId}-${Date.now()}`,
+      title: customTitle || `YouTube Video: ${videoId}`,
+      creator: 'YouTube Creator',
+      channelName: 'YouTube Channel',
+      duration: 300,
+      thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+      videoUrl: youtubeUrl.trim(),
+      sourceType: 'youtube',
+      youtubeUrl: youtubeUrl.trim(),
+      description: `Imported YouTube video URL: ${youtubeUrl.trim()}`,
+      transcript: customTranscript || '',
+      highlights: [],
+    };
+
+    onSelectVideo(newSource);
+    onClose();
   };
 
   return (
@@ -257,20 +241,37 @@ export const VideoImportModal: React.FC<VideoImportModalProps> = ({
 
           {activeTab === 'upload' && (
             <div className="space-y-4">
+              {uploadError && (
+                <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300">
+                  {uploadError}
+                </div>
+              )}
               <div className="border border-dashed border-zinc-800 hover:border-zinc-700 rounded-xl p-8 text-center bg-zinc-950/40 cursor-pointer">
                 <input
                   type="file"
                   accept="video/mp4,video/quicktime,video/webm"
                   onChange={handleFileUpload}
                   id="modal-upload"
+                  disabled={isLoading}
                   className="hidden"
                 />
                 <label htmlFor="modal-upload" className="cursor-pointer block space-y-2">
-                  <Upload className="w-8 h-8 mx-auto text-zinc-500" />
-                  <div className="text-xs font-medium text-zinc-300">
-                    <span className="text-violet-400">Click to select video</span> or drag and drop
-                  </div>
-                  <p className="text-[11px] text-zinc-500">MP4, MOV, or WebM up to 2GB</p>
+                  {isLoading ? (
+                    <>
+                      <Loader2 className="w-8 h-8 mx-auto text-violet-400 animate-spin" />
+                      <div className="text-xs font-medium text-violet-300">
+                        Uploading {uploadedFile?.name || 'video'}...
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <Upload className="w-8 h-8 mx-auto text-zinc-500" />
+                      <div className="text-xs font-medium text-zinc-300">
+                        <span className="text-violet-400">Click to select video</span> or drag and drop
+                      </div>
+                      <p className="text-[11px] text-zinc-500">MP4, MOV, or WebM up to 1.5GB</p>
+                    </>
+                  )}
                 </label>
               </div>
             </div>

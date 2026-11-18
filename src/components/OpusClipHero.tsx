@@ -16,6 +16,9 @@ import {
   ChevronRight,
   Layers,
   FileVideo,
+  AlertCircle,
+  Loader2,
+  X,
 } from 'lucide-react';
 import { SAMPLE_VIDEOS } from '../data/sampleVideos';
 import { VideoSource } from '../types';
@@ -29,6 +32,8 @@ interface OpusClipHeroProps {
   isProcessing: boolean;
   processingStep: string;
   processingProgress: number;
+  pipelineError?: string | null;
+  onDismissError?: () => void;
 }
 
 export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
@@ -36,40 +41,54 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
   isProcessing,
   processingStep,
   processingProgress,
+  pipelineError,
+  onDismissError,
 }) => {
   const [urlInput, setUrlInput] = useState('');
   const [selectedFocus, setSelectedFocus] = useState<string>('all');
   const [targetLength, setTargetLength] = useState<string>('auto');
   const [selectedSample, setSelectedSample] = useState<VideoSource | null>(SAMPLE_VIDEOS[0]);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const handleSampleClick = (sample: VideoSource) => {
     setSelectedSample(sample);
     setUrlInput(sample.youtubeUrl || '');
+    setUploadError(null);
   };
 
-  const handleFileUpload = (file?: File) => {
+  const handleFileUpload = async (file?: File) => {
     if (!file) return;
+    setUploadError(null);
+    setIsUploading(true);
 
-    const objectUrl = URL.createObjectURL(file);
-    const videoElem = document.createElement('video');
-    videoElem.src = objectUrl;
+    try {
+      const formData = new FormData();
+      formData.append('video', file);
 
-    videoElem.onloadedmetadata = () => {
-      const duration = Math.round(videoElem.duration) || 180;
+      const uploadRes = await fetch('/api/upload-video', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await uploadRes.json();
+      if (!uploadRes.ok || !data.playableSourceUrl) {
+        throw new Error(data.error || 'Video upload failed');
+      }
+
       const uploadedSource: VideoSource = {
         id: `upload-${Date.now()}`,
         title: file.name.replace(/\.[^/.]+$/, ''),
         creator: 'User Upload',
         channelName: 'Local Video',
-        duration,
+        duration: data.duration || 120,
         thumbnail: 'https://images.unsplash.com/photo-1574717024653-61fd2cf4d44d?auto=format&fit=crop&w=1200&q=80',
-        videoUrl: objectUrl,
+        videoUrl: data.playableSourceUrl,
+        playableSourceUrl: data.playableSourceUrl,
         sourceType: 'upload',
-        description: `Uploaded file: ${file.name}`,
-        transcript: `[00:00] Creator: Welcome back everyone. Let's break down this insane breakthrough today.
-[00:15] Guest: You will not believe what happened right before we started recording!
-[00:30] Creator: It was the funniest and most shocking moment of the entire week!`,
+        description: `Uploaded video: ${file.name} (${data.width}x${data.height})`,
+        transcript: '',
         highlights: [],
       };
 
@@ -78,24 +97,33 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
         focusCategory: selectedFocus,
         targetLength,
       });
-    };
+    } catch (err: any) {
+      setUploadError(err.message || 'Could not upload video file.');
+    } finally {
+      setIsUploading(false);
+    }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    setUploadError(null);
 
     let targetVideo: VideoSource;
+    const trimmedUrl = urlInput.trim();
 
     const matchedSample = SAMPLE_VIDEOS.find(
-      (s) => s.youtubeUrl === urlInput || (urlInput && s.id.includes(urlInput.toLowerCase()))
+      (s) => s.youtubeUrl === trimmedUrl || (trimmedUrl && s.id.includes(trimmedUrl.toLowerCase()))
     );
 
     if (matchedSample) {
-      targetVideo = matchedSample;
-    } else if (urlInput.trim()) {
+      targetVideo = {
+        ...matchedSample,
+        playableSourceUrl: matchedSample.videoUrl,
+      };
+    } else if (trimmedUrl) {
       let videoId = 'custom';
-      const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
-      const match = urlInput.match(regExp);
+      const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|shorts\/|watch\?v=|&v=)([^#&?]*).*/;
+      const match = trimmedUrl.match(regExp);
       if (match && match[2].length === 11) {
         videoId = match[2];
       }
@@ -104,20 +132,26 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
         id: `yt-${videoId}-${Date.now()}`,
         title: `YouTube Video: ${videoId}`,
         creator: 'YouTube Creator',
-        channelName: 'Viral Channel',
+        channelName: 'YouTube Channel',
         duration: 300,
         thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
-        videoUrl: urlInput,
+        videoUrl: trimmedUrl,
         sourceType: 'youtube',
-        youtubeUrl: urlInput,
-        description: `YouTube URL: ${urlInput}`,
+        youtubeUrl: trimmedUrl,
+        description: `YouTube URL: ${trimmedUrl}`,
         transcript: '',
         highlights: [],
       };
     } else if (selectedSample) {
-      targetVideo = selectedSample;
+      targetVideo = {
+        ...selectedSample,
+        playableSourceUrl: selectedSample.videoUrl,
+      };
     } else {
-      targetVideo = SAMPLE_VIDEOS[0];
+      targetVideo = {
+        ...SAMPLE_VIDEOS[0],
+        playableSourceUrl: SAMPLE_VIDEOS[0].videoUrl,
+      };
     }
 
     onGenerateClips({
@@ -230,6 +264,27 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
         </p>
       </div>
 
+      {/* Error Alert Banner */}
+      {(pipelineError || uploadError) && (
+        <div className="max-w-3xl mx-auto rounded-xl bg-rose-500/10 border border-rose-500/30 p-4 flex items-start gap-3 text-xs text-rose-200">
+          <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+          <div className="flex-1 space-y-1">
+            <div className="font-semibold text-rose-300">Clipping Pipeline Notice</div>
+            <p className="text-rose-200/90 leading-relaxed">{uploadError || pipelineError}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setUploadError(null);
+              if (onDismissError) onDismissError();
+            }}
+            className="text-rose-400 hover:text-rose-200 p-1 rounded cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* Main Ingest Deck */}
       <div className="max-w-3xl mx-auto bg-zinc-900/80 border border-zinc-800/90 rounded-2xl p-6 sm:p-8 shadow-xl space-y-6">
         {/* Input Form */}
@@ -258,7 +313,8 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
               />
               <button
                 type="submit"
-                className="absolute right-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-violet-600 hover:bg-violet-500 text-white shadow-sm transition-all cursor-pointer flex items-center gap-1.5"
+                disabled={isUploading}
+                className="absolute right-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-violet-600 hover:bg-violet-500 text-white shadow-sm transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
               >
                 <span>Clip Video</span>
                 <ArrowRight className="w-3.5 h-3.5" />
@@ -290,15 +346,25 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
               accept="video/mp4,video/quicktime,video/webm"
               onChange={(e) => handleFileUpload(e.target.files?.[0])}
               id="file-upload-input"
+              disabled={isUploading}
               className="hidden"
             />
             <label htmlFor="file-upload-input" className="cursor-pointer block space-y-1">
-              <div className="flex items-center justify-center gap-2 text-xs text-zinc-300">
-                <Upload className="w-4 h-4 text-zinc-400" />
-                <span className="font-medium text-violet-400 hover:underline">Upload a local video file</span>
-                <span className="text-zinc-500">or drag and drop</span>
-              </div>
-              <p className="text-[11px] text-zinc-500">MP4, MOV, or WebM up to 2GB</p>
+              {isUploading ? (
+                <div className="flex items-center justify-center gap-2 text-xs text-violet-300">
+                  <Loader2 className="w-4 h-4 animate-spin text-violet-400" />
+                  <span className="font-medium">Uploading video to AI Studio server...</span>
+                </div>
+              ) : (
+                <>
+                  <div className="flex items-center justify-center gap-2 text-xs text-zinc-300">
+                    <Upload className="w-4 h-4 text-zinc-400" />
+                    <span className="font-medium text-violet-400 hover:underline">Upload a local video file</span>
+                    <span className="text-zinc-500">or drag and drop</span>
+                  </div>
+                  <p className="text-[11px] text-zinc-500">MP4, MOV, or WebM up to 1.5GB</p>
+                </>
+              )}
             </label>
           </div>
         </form>
