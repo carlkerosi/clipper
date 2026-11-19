@@ -1,4 +1,13 @@
-import { CaptionChunk, CaptionPreset, FramingMode, CaptionEntranceAnimation, CaptionExitAnimation } from '../types';
+import {
+  CaptionChunk,
+  CaptionPreset,
+  CaptionHighlightStyle,
+  CaptionFontFamily,
+  CaptionTextCase,
+  FramingMode,
+  CaptionEntranceAnimation,
+  CaptionExitAnimation,
+} from '../types';
 import { drawVerticalFrame } from './captionRenderer';
 
 export interface VideoExportOptions {
@@ -10,9 +19,16 @@ export interface VideoExportOptions {
   framingMode: FramingMode;
   panX: number;
   captionPreset: CaptionPreset;
+  captionHighlightStyle?: CaptionHighlightStyle;
   captionPosition: 'top' | 'middle' | 'lower_third' | 'bottom';
   captionFontSize: number;
   captionColor: string;
+  captionBaseColor?: string;
+  captionFontFamily?: CaptionFontFamily;
+  captionTextCase?: CaptionTextCase;
+  captionOutlineWidth?: number;
+  captionWordsPerLine?: 'single_line' | 'multi_line';
+  captionDropShadow?: boolean;
   captionEntranceAnim?: CaptionEntranceAnimation;
   captionExitAnim?: CaptionExitAnimation;
   captions: CaptionChunk[];
@@ -33,9 +49,16 @@ export async function exportVerticalVideo(options: VideoExportOptions): Promise<
     framingMode,
     panX,
     captionPreset,
+    captionHighlightStyle,
     captionPosition,
     captionFontSize,
     captionColor,
+    captionBaseColor,
+    captionFontFamily,
+    captionTextCase,
+    captionOutlineWidth,
+    captionWordsPerLine,
+    captionDropShadow,
     captionEntranceAnim,
     captionExitAnim,
     captions,
@@ -169,9 +192,16 @@ export async function exportVerticalVideo(options: VideoExportOptions): Promise<
         clipDuration: duration,
         captions,
         captionPreset,
+        captionHighlightStyle,
         captionPosition,
         captionFontSize: scaledFontSize,
         captionColor,
+        captionBaseColor,
+        captionFontFamily,
+        captionTextCase,
+        captionOutlineWidth,
+        captionWordsPerLine,
+        captionDropShadow,
         captionEntranceAnim,
         captionExitAnim,
         framingMode,

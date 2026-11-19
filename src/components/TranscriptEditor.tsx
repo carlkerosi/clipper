@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { FileText, Sparkles, Edit3, Check, Clock, Tag } from 'lucide-react';
+import { FileText, Sparkles, Edit3, Check, Clock, Tag, Languages, AlertCircle } from 'lucide-react';
 import { ClipHighlight, CaptionChunk } from '../types';
 
 interface TranscriptEditorProps {
@@ -19,6 +19,9 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
   const [editText, setEditText] = useState('');
   const [editEmphasis, setEditEmphasis] = useState('');
   const [isAiRegenerating, setIsAiRegenerating] = useState(false);
+  const [isTranslating, setIsTranslating] = useState(false);
+  const [targetLang, setTargetLang] = useState('Spanish');
+  const [aiError, setAiError] = useState<string | null>(null);
 
   const handleStartEdit = (index: number, chunk: CaptionChunk) => {
     setEditingIndex(index);
@@ -39,6 +42,7 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
 
   const handleAiRegenerate = async () => {
     setIsAiRegenerating(true);
+    setAiError(null);
     try {
       const fullText = activeClip.captions.map((c) => c.text).join(' ');
       const duration = activeClip.endTime - activeClip.startTime;
@@ -52,16 +56,44 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
         }),
       });
 
-      if (res.ok) {
-        const data = await res.json();
-        if (data.captions && data.captions.length > 0) {
-          onUpdateCaptions(data.captions);
-        }
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to regenerate captions.');
       }
-    } catch (err) {
-      console.error('Failed to regenerate captions:', err);
+      if (data.captions && data.captions.length > 0) {
+        onUpdateCaptions(data.captions);
+      }
+    } catch (err: any) {
+      setAiError(err.message || 'Could not re-sync captions with Gemini.');
     } finally {
       setIsAiRegenerating(false);
+    }
+  };
+
+  const handleAiTranslate = async () => {
+    if (!activeClip.captions.length) return;
+    setIsTranslating(true);
+    setAiError(null);
+    try {
+      const res = await fetch('/api/ai-translate-captions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          captions: activeClip.captions,
+          targetLanguage: targetLang,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to transform captions.');
+      }
+      if (data.captions && data.captions.length > 0) {
+        onUpdateCaptions(data.captions);
+      }
+    } catch (err: any) {
+      setAiError(err.message || 'Could not translate or adapt captions.');
+    } finally {
+      setIsTranslating(false);
     }
   };
 
@@ -79,13 +111,13 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
           <FileText className="w-4 h-4 text-violet-400" />
           <div>
             <h3 className="text-xs font-semibold text-zinc-200">Dialogue Script</h3>
-            <p className="text-[11px] text-zinc-500">Click to seek timestamp. Edit words or emphasis.</p>
+            <p className="text-[11px] text-zinc-500">Click to seek. Edit, re-sync, or translate.</p>
           </div>
         </div>
 
         <button
           onClick={handleAiRegenerate}
-          disabled={isAiRegenerating}
+          disabled={isAiRegenerating || isTranslating}
           className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition-colors cursor-pointer disabled:opacity-50"
           title="Regenerate timed subtitles with Gemini"
         >
@@ -93,6 +125,39 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
           <span>{isAiRegenerating ? 'Syncing...' : 'AI Re-sync'}</span>
         </button>
       </div>
+
+      {/* AI Translate / Tone Adapt Bar */}
+      <div className="flex items-center gap-2 p-2 rounded-xl bg-zinc-950/70 border border-zinc-800">
+        <Languages className="w-3.5 h-3.5 text-violet-400 shrink-0 ml-1" />
+        <select
+          value={targetLang}
+          onChange={(e) => setTargetLang(e.target.value)}
+          disabled={isTranslating}
+          className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-2 py-1 text-[11px] text-zinc-200 focus:outline-none focus:border-violet-500 cursor-pointer"
+        >
+          <option value="Spanish">Translate: Spanish</option>
+          <option value="French">Translate: French</option>
+          <option value="Portuguese">Translate: Portuguese</option>
+          <option value="German">Translate: German</option>
+          <option value="Japanese">Translate: Japanese</option>
+          <option value="Hindi">Translate: Hindi</option>
+          <option value="Ultra-Punchy TikTok English Hooks">Rewrite: Punchy Hooks (EN)</option>
+        </select>
+        <button
+          onClick={handleAiTranslate}
+          disabled={isTranslating || isAiRegenerating}
+          className="px-2.5 py-1 rounded-lg bg-violet-600/20 hover:bg-violet-600/30 text-violet-300 border border-violet-500/40 text-[11px] font-semibold cursor-pointer disabled:opacity-50 shrink-0"
+        >
+          {isTranslating ? 'Applying...' : 'AI Adapt'}
+        </button>
+      </div>
+
+      {aiError && (
+        <div className="p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/30 text-[11px] text-rose-300 flex items-start gap-2">
+          <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+          <span>{aiError}</span>
+        </div>
+      )}
 
       {/* Caption Line Items */}
       <div className="flex-1 overflow-y-auto space-y-2 pr-1">

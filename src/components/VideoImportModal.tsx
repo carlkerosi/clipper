@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { X, Youtube, Upload, Film, Sparkles, ArrowRight, Loader2 } from 'lucide-react';
+import { X, Upload, Film, Sparkles, ArrowRight, Loader2, Globe } from 'lucide-react';
 import { SAMPLE_VIDEOS } from '../data/sampleVideos';
 import { VideoSource } from '../types';
+import thumbNeuro from '../assets/images/thumb_neuro_lab_1795100814397.jpg';
 
 interface VideoImportModalProps {
   isOpen: boolean;
@@ -61,7 +62,7 @@ export const VideoImportModal: React.FC<VideoImportModalProps> = ({
         creator: 'User Upload',
         channelName: 'My Local Videos',
         duration: data.duration || 120,
-        thumbnail: 'https://images.unsplash.com/photo-1574717024653-61fd2cf4d44d?auto=format&fit=crop&w=1200&q=80',
+        thumbnail: thumbNeuro,
         videoUrl: data.playableSourceUrl,
         playableSourceUrl: data.playableSourceUrl,
         sourceType: 'upload',
@@ -79,28 +80,57 @@ export const VideoImportModal: React.FC<VideoImportModalProps> = ({
     }
   };
 
-  const handleYoutubeSubmit = (e: React.FormEvent) => {
+  const handleUrlSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!youtubeUrl.trim()) return;
+    const rawUrl = youtubeUrl.trim();
+    if (!rawUrl) return;
 
-    let videoId = 'custom';
     const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|shorts\/|watch\?v=|&v=)([^#&?]*).*/;
-    const match = youtubeUrl.match(regExp);
-    if (match && match[2].length === 11) {
-      videoId = match[2];
+    const match = rawUrl.match(regExp);
+    const isYoutube =
+      (rawUrl.includes('youtube.com') || rawUrl.includes('youtu.be')) &&
+      Boolean(match && match[2]?.length === 11);
+
+    if (isYoutube && match) {
+      const videoId = match[2];
+      const newSource: VideoSource = {
+        id: `yt-${videoId}-${Date.now()}`,
+        title: customTitle || `YouTube Video: ${videoId}`,
+        creator: 'YouTube Creator',
+        channelName: 'YouTube Channel',
+        duration: 300,
+        thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+        videoUrl: rawUrl,
+        sourceType: 'youtube',
+        youtubeUrl: rawUrl,
+        youtubeVideoId: videoId,
+        description: `Imported YouTube video URL: ${rawUrl}`,
+        transcript: customTranscript || '',
+        highlights: [],
+      };
+      onSelectVideo(newSource);
+      onClose();
+      return;
     }
 
+    const hostLabel = (() => {
+      try {
+        return new URL(rawUrl).hostname.replace(/^www\./, '');
+      } catch {
+        return 'External Video';
+      }
+    })();
+
     const newSource: VideoSource = {
-      id: `yt-${videoId}-${Date.now()}`,
-      title: customTitle || `YouTube Video: ${videoId}`,
-      creator: 'YouTube Creator',
-      channelName: 'YouTube Channel',
-      duration: 300,
-      thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
-      videoUrl: youtubeUrl.trim(),
-      sourceType: 'youtube',
-      youtubeUrl: youtubeUrl.trim(),
-      description: `Imported YouTube video URL: ${youtubeUrl.trim()}`,
+      id: `url-${Date.now()}`,
+      title: customTitle || `Video from ${hostLabel}`,
+      creator: hostLabel,
+      channelName: hostLabel,
+      duration: 180,
+      thumbnail: thumbNeuro,
+      videoUrl: rawUrl,
+      sourceType: 'url',
+      description: `Imported video URL: ${rawUrl}`,
       transcript: customTranscript || '',
       highlights: [],
     };
@@ -151,8 +181,8 @@ export const VideoImportModal: React.FC<VideoImportModalProps> = ({
                 : 'text-zinc-400 hover:text-zinc-200'
             }`}
           >
-            <Youtube className="w-3.5 h-3.5 text-red-500" />
-            <span>YouTube URL</span>
+            <Globe className="w-3.5 h-3.5 text-violet-400" />
+            <span>Any Video URL</span>
           </button>
 
           <button
@@ -187,6 +217,7 @@ export const VideoImportModal: React.FC<VideoImportModalProps> = ({
                         <img
                           src={video.thumbnail}
                           alt={video.title}
+                          referrerPolicy="no-referrer"
                           className="w-full h-full object-cover"
                         />
                         <div className="absolute bottom-1.5 right-1.5 px-1.5 py-0.5 rounded bg-black/80 text-[10px] font-mono tabular-nums text-zinc-300">
@@ -210,18 +241,20 @@ export const VideoImportModal: React.FC<VideoImportModalProps> = ({
           )}
 
           {activeTab === 'youtube' && (
-            <form onSubmit={handleYoutubeSubmit} className="space-y-4">
+            <form onSubmit={handleUrlSubmit} className="space-y-4">
               <div className="space-y-1.5">
-                <label className="text-xs font-medium text-zinc-300">YouTube Video URL</label>
+                <label className="text-xs font-medium text-zinc-300">
+                  Any Video Link (YouTube, TikTok, Vimeo, Instagram, X, or Direct MP4)
+                </label>
                 <div className="relative flex items-center">
                   <div className="absolute left-3 text-zinc-500">
-                    <Youtube className="w-4 h-4 text-red-500" />
+                    <Globe className="w-4 h-4 text-violet-400" />
                   </div>
                   <input
                     type="url"
                     value={youtubeUrl}
                     onChange={(e) => setYoutubeUrl(e.target.value)}
-                    placeholder="https://www.youtube.com/watch?v=..."
+                    placeholder="https://www.youtube.com/watch?v=... or https://example.com/video.mp4"
                     className="w-full pl-9 pr-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-violet-500"
                     required
                   />

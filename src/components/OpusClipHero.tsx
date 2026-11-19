@@ -21,14 +21,11 @@ import {
   X,
 } from 'lucide-react';
 import { SAMPLE_VIDEOS } from '../data/sampleVideos';
-import { VideoSource } from '../types';
+import { VideoSource, ClipGenerationOptions } from '../types';
+import thumbNeuro from '../assets/images/thumb_neuro_lab_1795100814397.jpg';
 
 interface OpusClipHeroProps {
-  onGenerateClips: (options: {
-    videoSource: VideoSource;
-    focusCategory: string;
-    targetLength: string;
-  }) => void;
+  onGenerateClips: (options: ClipGenerationOptions) => void;
   isProcessing: boolean;
   processingStep: string;
   processingProgress: number;
@@ -47,10 +44,24 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
   const [urlInput, setUrlInput] = useState('');
   const [selectedFocus, setSelectedFocus] = useState<string>('all');
   const [targetLength, setTargetLength] = useState<string>('auto');
+  const [customPrompt, setCustomPrompt] = useState('');
+  const [clipCount, setClipCount] = useState<number>(0);
+  const [minDurationSec, setMinDurationSec] = useState<number>(10);
+  const [maxDurationSec, setMaxDurationSec] = useState<number>(90);
   const [selectedSample, setSelectedSample] = useState<VideoSource | null>(SAMPLE_VIDEOS[0]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+
+  const buildGenOptions = (videoSource: VideoSource): ClipGenerationOptions => ({
+    videoSource,
+    focusCategory: selectedFocus,
+    targetLength,
+    customPrompt: customPrompt.trim() || undefined,
+    clipCount: clipCount || undefined,
+    minDurationSec: targetLength === 'custom' ? minDurationSec : undefined,
+    maxDurationSec: targetLength === 'custom' ? maxDurationSec : undefined,
+  });
 
   const handleSampleClick = (sample: VideoSource) => {
     setSelectedSample(sample);
@@ -83,7 +94,7 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
         creator: 'User Upload',
         channelName: 'Local Video',
         duration: data.duration || 120,
-        thumbnail: 'https://images.unsplash.com/photo-1574717024653-61fd2cf4d44d?auto=format&fit=crop&w=1200&q=80',
+        thumbnail: thumbNeuro,
         videoUrl: data.playableSourceUrl,
         playableSourceUrl: data.playableSourceUrl,
         sourceType: 'upload',
@@ -92,11 +103,7 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
         highlights: [],
       };
 
-      onGenerateClips({
-        videoSource: uploadedSource,
-        focusCategory: selectedFocus,
-        targetLength,
-      });
+      onGenerateClips(buildGenOptions(uploadedSource));
     } catch (err: any) {
       setUploadError(err.message || 'Could not upload video file.');
     } finally {
@@ -121,27 +128,46 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
         playableSourceUrl: matchedSample.videoUrl,
       };
     } else if (trimmedUrl) {
-      let videoId = 'custom';
       const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|shorts\/|watch\?v=|&v=)([^#&?]*).*/;
       const match = trimmedUrl.match(regExp);
-      if (match && match[2].length === 11) {
-        videoId = match[2];
-      }
+      const isYoutube = Boolean(
+        match?.[2]?.length === 11 ||
+          trimmedUrl.includes('youtube.com') ||
+          trimmedUrl.includes('youtu.be')
+      );
 
-      targetVideo = {
-        id: `yt-${videoId}-${Date.now()}`,
-        title: `YouTube Video: ${videoId}`,
-        creator: 'YouTube Creator',
-        channelName: 'YouTube Channel',
-        duration: 300,
-        thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
-        videoUrl: trimmedUrl,
-        sourceType: 'youtube',
-        youtubeUrl: trimmedUrl,
-        description: `YouTube URL: ${trimmedUrl}`,
-        transcript: '',
-        highlights: [],
-      };
+      if (isYoutube) {
+        const videoId = match && match[2].length === 11 ? match[2] : 'custom';
+        targetVideo = {
+          id: `yt-${videoId}-${Date.now()}`,
+          title: `YouTube Video: ${videoId}`,
+          creator: 'YouTube Creator',
+          channelName: 'YouTube Channel',
+          duration: 300,
+          thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+          videoUrl: trimmedUrl,
+          sourceType: 'youtube',
+          youtubeUrl: trimmedUrl,
+          youtubeVideoId: videoId !== 'custom' ? videoId : undefined,
+          description: `YouTube URL: ${trimmedUrl}`,
+          transcript: '',
+          highlights: [],
+        };
+      } else {
+        targetVideo = {
+          id: `url-${Date.now()}`,
+          title: 'External Video URL',
+          creator: 'Web Source',
+          channelName: 'Imported URL',
+          duration: 180,
+          thumbnail: thumbNeuro,
+          videoUrl: trimmedUrl,
+          sourceType: 'url',
+          description: `External video URL: ${trimmedUrl}`,
+          transcript: '',
+          highlights: [],
+        };
+      }
     } else if (selectedSample) {
       targetVideo = {
         ...selectedSample,
@@ -154,11 +180,7 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
       };
     }
 
-    onGenerateClips({
-      videoSource: targetVideo,
-      focusCategory: selectedFocus,
-      targetLength,
-    });
+    onGenerateClips(buildGenOptions(targetVideo));
   };
 
   const handlePaste = async () => {
@@ -291,7 +313,7 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-1.5">
             <label className="text-xs font-medium text-zinc-300 flex items-center justify-between">
-              <span>YouTube Video URL</span>
+              <span>Any Video URL (YouTube, TikTok, Vimeo, Direct .mp4/.webm)</span>
               <button
                 type="button"
                 onClick={handlePaste}
@@ -308,7 +330,7 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
                 type="url"
                 value={urlInput}
                 onChange={(e) => setUrlInput(e.target.value)}
-                placeholder="https://www.youtube.com/watch?v=..."
+                placeholder="https://www.youtube.com/watch?v=... or direct .mp4/.mov link"
                 className="w-full pl-11 pr-32 py-3 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-100 placeholder-zinc-500 text-sm focus:outline-none focus:border-violet-500 transition-colors"
               />
               <button
@@ -319,6 +341,49 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
                 <span>Clip Video</span>
                 <ArrowRight className="w-3.5 h-3.5" />
               </button>
+            </div>
+          </div>
+
+          {/* Unrestricted AI Prompt Director */}
+          <div className="space-y-2 p-3.5 rounded-xl bg-zinc-950/70 border border-zinc-800">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-medium text-zinc-200 flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-violet-400" />
+                <span>AI Clipping Instructions (Any Style, Any Topic, Unrestricted)</span>
+              </label>
+              {customPrompt && (
+                <button
+                  type="button"
+                  onClick={() => setCustomPrompt('')}
+                  className="text-[11px] text-zinc-500 hover:text-zinc-300 cursor-pointer"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <input
+              type="text"
+              value={customPrompt}
+              onChange={(e) => setCustomPrompt(e.target.value)}
+              placeholder='e.g. "Clip every funny reaction under 15s", "Extract all product demos", or leave blank for auto viral hooks'
+              className="w-full px-3 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-violet-500"
+            />
+            <div className="flex flex-wrap gap-1.5">
+              {[
+                'Find the funniest & most chaotic reactions',
+                'Clip every key insight & tutorial step',
+                'Extract 6 rapid-fire 10s hooks',
+                'Clip deep storytelling arcs (60-120s)',
+              ].map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => setCustomPrompt(preset)}
+                  className="px-2 py-0.5 rounded bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[11px] text-zinc-400 hover:text-zinc-200 transition-colors cursor-pointer"
+                >
+                  {preset}
+                </button>
+              ))}
             </div>
           </div>
 
@@ -369,55 +434,115 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
           </div>
         </form>
 
-        {/* AI Extraction Preferences */}
-        <div className="pt-4 border-t border-zinc-800/80 flex flex-wrap items-center justify-between gap-4">
-          {/* Focus mode */}
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-zinc-400 font-medium">Moment Focus:</span>
-            <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800">
-              {[
-                { id: 'all', label: 'All Viral' },
-                { id: 'funny', label: 'Humor & Banter' },
-                { id: 'highlight', label: 'Climax' },
-                { id: 'educational', label: 'Insights' },
-              ].map((opt) => (
-                <button
-                  key={opt.id}
-                  onClick={() => setSelectedFocus(opt.id)}
-                  className={`px-2.5 py-1 text-xs rounded-md font-medium transition-colors cursor-pointer ${
-                    selectedFocus === opt.id
-                      ? 'bg-zinc-800 text-white'
-                      : 'text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  {opt.label}
-                </button>
-              ))}
+        {/* Unrestricted AI Extraction Controls */}
+        <div className="pt-4 border-t border-zinc-800/80 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            {/* Focus mode */}
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-zinc-400 font-medium">Focus:</span>
+              <div className="flex flex-wrap items-center gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800">
+                {[
+                  { id: 'all', label: 'All Viral' },
+                  { id: 'funny', label: 'Humor' },
+                  { id: 'highlight', label: 'Climax' },
+                  { id: 'educational', label: 'Insights' },
+                  { id: 'debate', label: 'Debate' },
+                ].map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setSelectedFocus(opt.id)}
+                    className={`px-2 py-1 text-xs rounded-md font-medium transition-colors cursor-pointer ${
+                      selectedFocus === opt.id
+                        ? 'bg-zinc-800 text-white'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Clip Count */}
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-zinc-400 font-medium">Clips:</span>
+              <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800">
+                {[
+                  { val: 0, label: 'Auto' },
+                  { val: 3, label: '3' },
+                  { val: 5, label: '5' },
+                  { val: 8, label: '8' },
+                  { val: 12, label: '12' },
+                ].map((cnt) => (
+                  <button
+                    key={cnt.val}
+                    type="button"
+                    onClick={() => setClipCount(cnt.val)}
+                    className={`px-2 py-1 text-xs rounded-md font-mono transition-colors cursor-pointer ${
+                      clipCount === cnt.val
+                        ? 'bg-zinc-800 text-white font-semibold'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {cnt.label}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
-          {/* Length mode */}
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-zinc-400 font-medium">Clip Target:</span>
-            <div className="flex items-center gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800">
-              {[
-                { id: 'auto', label: 'Auto (15-60s)' },
-                { id: '<30s', label: '< 30s' },
-                { id: '30-60s', label: '30-60s' },
-              ].map((len) => (
-                <button
-                  key={len.id}
-                  onClick={() => setTargetLength(len.id)}
-                  className={`px-2.5 py-1 text-xs rounded-md font-medium transition-colors cursor-pointer ${
-                    targetLength === len.id
-                      ? 'bg-zinc-800 text-white'
-                      : 'text-zinc-400 hover:text-zinc-200'
-                  }`}
-                >
-                  {len.label}
-                </button>
-              ))}
+          {/* Unrestricted Length Controls */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs text-zinc-400 font-medium">Clip Length:</span>
+              <div className="flex flex-wrap items-center gap-1 bg-zinc-950 p-1 rounded-lg border border-zinc-800">
+                {[
+                  { id: 'auto', label: 'Any Length' },
+                  { id: '5-15s', label: '5-15s' },
+                  { id: '<30s', label: '<30s' },
+                  { id: '30-60s', label: '30-60s' },
+                  { id: '60-180s', label: '60-180s' },
+                  { id: 'custom', label: 'Custom' },
+                ].map((len) => (
+                  <button
+                    key={len.id}
+                    type="button"
+                    onClick={() => setTargetLength(len.id)}
+                    className={`px-2 py-1 text-xs rounded-md font-medium transition-colors cursor-pointer ${
+                      targetLength === len.id
+                        ? 'bg-zinc-800 text-white'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {len.label}
+                  </button>
+                ))}
+              </div>
             </div>
+
+            {targetLength === 'custom' && (
+              <div className="flex items-center gap-2 text-xs font-mono">
+                <input
+                  type="number"
+                  min={3}
+                  max={290}
+                  value={minDurationSec}
+                  onChange={(e) => setMinDurationSec(Math.max(3, Number(e.target.value) || 5))}
+                  className="w-16 px-2 py-1 rounded bg-zinc-950 border border-zinc-800 text-zinc-200 text-center"
+                />
+                <span className="text-zinc-500">to</span>
+                <input
+                  type="number"
+                  min={5}
+                  max={300}
+                  value={maxDurationSec}
+                  onChange={(e) => setMaxDurationSec(Math.max(5, Math.min(300, Number(e.target.value) || 60)))}
+                  className="w-16 px-2 py-1 rounded bg-zinc-950 border border-zinc-800 text-zinc-200 text-center"
+                />
+                <span className="text-zinc-500">sec</span>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -449,6 +574,7 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
                     <img
                       src={sample.thumbnail}
                       alt={sample.title}
+                      referrerPolicy="no-referrer"
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                     />
                     <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />
@@ -475,11 +601,10 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      onGenerateClips({
-                        videoSource: sample,
-                        focusCategory: selectedFocus,
-                        targetLength,
-                      });
+                      onGenerateClips(buildGenOptions({
+                        ...sample,
+                        playableSourceUrl: sample.videoUrl,
+                      }));
                     }}
                     className="text-xs font-semibold text-violet-400 hover:text-violet-300 flex items-center gap-1 cursor-pointer"
                   >

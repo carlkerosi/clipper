@@ -6,7 +6,7 @@ interface HighlightListProps {
   highlights: ClipHighlight[];
   activeClip: ClipHighlight | null;
   onSelectClip: (clip: ClipHighlight) => void;
-  onTriggerAiScan: (filter?: string) => void;
+  onTriggerAiScan: (filter?: string, customPrompt?: string) => void;
   isAiScanning: boolean;
 }
 
@@ -18,6 +18,7 @@ export const HighlightList: React.FC<HighlightListProps> = ({
   isAiScanning,
 }) => {
   const [selectedCategory, setSelectedCategory] = useState<ClipCategory>('all');
+  const [customPrompt, setCustomPrompt] = useState('');
 
   const filteredClips = highlights.filter((clip) => {
     if (selectedCategory === 'all') return true;
@@ -33,8 +34,8 @@ export const HighlightList: React.FC<HighlightListProps> = ({
   return (
     <div className="flex flex-col h-full bg-zinc-900/80 rounded-2xl border border-zinc-800 overflow-hidden shadow-xl">
       {/* Header */}
-      <div className="p-3.5 border-b border-zinc-800 bg-zinc-950/60">
-        <div className="flex items-center justify-between mb-2.5">
+      <div className="p-3.5 border-b border-zinc-800 bg-zinc-950/60 space-y-2.5">
+        <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <TrendingUp className="w-4 h-4 text-violet-400" />
             <h3 className="text-xs font-semibold text-zinc-200">
@@ -46,7 +47,12 @@ export const HighlightList: React.FC<HighlightListProps> = ({
           </div>
 
           <button
-            onClick={() => onTriggerAiScan(selectedCategory === 'all' ? undefined : selectedCategory)}
+            onClick={() =>
+              onTriggerAiScan(
+                selectedCategory === 'all' ? undefined : selectedCategory,
+                customPrompt.trim() || undefined
+              )
+            }
             disabled={isAiScanning}
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 transition-colors cursor-pointer disabled:opacity-50"
             title="Search for more viral moments"
@@ -55,6 +61,28 @@ export const HighlightList: React.FC<HighlightListProps> = ({
             <span>{isAiScanning ? 'Scanning...' : 'Find More'}</span>
           </button>
         </div>
+
+        {/* Custom AI Prompt Input */}
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (isAiScanning) return;
+            onTriggerAiScan(
+              selectedCategory === 'all' ? undefined : selectedCategory,
+              customPrompt.trim() || undefined
+            );
+            setCustomPrompt('');
+          }}
+        >
+          <input
+            type="text"
+            value={customPrompt}
+            onChange={(e) => setCustomPrompt(e.target.value)}
+            disabled={isAiScanning}
+            placeholder="Custom AI prompt (e.g. 'best 12s hook')..."
+            className="w-full px-2.5 py-1.5 bg-zinc-950 border border-zinc-800 rounded-lg text-[11px] text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-violet-500 disabled:opacity-60"
+          />
+        </form>
 
         {/* Category Filter Pills */}
         <div className="flex items-center gap-1 overflow-x-auto pb-0.5 no-scrollbar">
@@ -86,8 +114,14 @@ export const HighlightList: React.FC<HighlightListProps> = ({
             <Sparkles className="w-6 h-6 mx-auto text-zinc-600" />
             <p className="text-xs">No moments in this category.</p>
             <button
-              onClick={() => onTriggerAiScan(selectedCategory)}
-              className="px-3 py-1 bg-violet-600 text-white font-medium text-xs rounded-lg"
+              onClick={() =>
+                onTriggerAiScan(
+                  selectedCategory === 'all' ? undefined : selectedCategory,
+                  customPrompt.trim() || undefined
+                )
+              }
+              disabled={isAiScanning}
+              className="px-3 py-1 bg-violet-600 text-white font-medium text-xs rounded-lg cursor-pointer disabled:opacity-50"
             >
               Scan with AI
             </button>

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Play,
   Pause,
@@ -8,24 +8,44 @@ import {
   Check,
   FileText,
   Sparkles,
-  TrendingUp,
   Volume2,
   VolumeX,
   Loader2,
   RefreshCw,
   Share2,
   X,
+  Youtube,
+  ArrowUpDown,
+  Highlighter,
+  Hash,
 } from 'lucide-react';
-import { ClipHighlight, VideoSource } from '../types';
+import {
+  ClipHighlight,
+  VideoSource,
+  ExportSettings,
+  CaptionHighlightStyle,
+  CaptionTextCase,
+} from '../types';
 import { generateSrtFile, downloadBlob } from '../utils/exportVideo';
+import { formatCaptionCase } from '../utils/captionRenderer';
+
+function extractYoutubeVideoId(url?: string): string {
+  if (!url) return '';
+  const match = url.match(/^.*(youtu.be\/|v\/|u\/\w\/|embed\/|shorts\/|watch\?v=|&v=)([^#&?]*).*/);
+  return match && match[2] && match[2].length === 11 ? match[2] : '';
+}
 
 interface OpusClipFeedProps {
   videoSource: VideoSource;
   highlights: ClipHighlight[];
+  settings: ExportSettings;
+  onUpdateSettings: (newSettings: Partial<ExportSettings>) => void;
   onSelectClipToEdit: (clip: ClipHighlight) => void;
   onOpenExportModal: (clip: ClipHighlight) => void;
   onNewVideo: () => void;
   onClipUpdated?: (updatedClip: ClipHighlight) => void;
+  isAiGenerating?: boolean;
+  onGenerateMoreClips?: (customPrompt: string, clipCount: number) => void;
 }
 
 interface SocialPack {
@@ -39,13 +59,21 @@ interface SocialPack {
 export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
   videoSource,
   highlights,
+  settings,
+  onUpdateSettings,
   onSelectClipToEdit,
   onOpenExportModal,
   onNewVideo,
   onClipUpdated,
+  isAiGenerating = false,
+  onGenerateMoreClips,
 }) => {
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
+  const [sortBy, setSortBy] = useState<'score' | 'timeline'>('score');
+  const [morePrompt, setMorePrompt] = useState('');
+  const [moreCount, setMoreCount] = useState<number>(3);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [copiedHashtag, setCopiedHashtag] = useState<string | null>(null);
   const [playingClipId, setPlayingClipId] = useState<string | null>(null);
   const [playheadMap, setPlayheadMap] = useState<Record<string, number>>({});
   const [isMuted, setIsMuted] = useState(false);
@@ -62,15 +90,24 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
 
   const videoRefMap = useRef<Record<string, HTMLVideoElement | null>>({});
 
-  const filtered = highlights.filter((c) => {
-    if (selectedCategory === 'all') return true;
-    return c.category === selectedCategory;
-  });
+  const filtered = highlights
+    .filter((c) => {
+      if (selectedCategory === 'all') return true;
+      return c.category === selectedCategory;
+    })
+    .sort((a, b) => {
+      if (sortBy === 'score') return b.viralityScore - a.viralityScore;
+      return a.startTime - b.startTime;
+    });
 
   const topClip = highlights.reduce(
     (max, c) => (c.viralityScore > (max?.viralityScore || 0) ? c : max),
     highlights[0]
   );
+
+  const ytId =
+    videoSource.youtubeVideoId ||
+    extractYoutubeVideoId(videoSource.youtubeUrl || videoSource.videoUrl);
 
   const getClipVideoSource = (clip: ClipHighlight): string => {
     if (clip.clipVideoUrl) return clip.clipVideoUrl;
@@ -85,15 +122,70 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
     return '';
   };
 
-  const handleTogglePlay = async (clip: ClipHighlight) => {
-    const isCurrentPlaying = playingClipId === clip.id;
+  // Synced timer loop for embedded YouTube 9:16 playback so word-highlighted subtitles animate live
+  useEffect(() => {
+    if (!playingClipId) return;
+    const playingClip = highlights.find((c) => c.id === playingClipId);
+    if (!playingClip) return;
+    const hasMp4 = Boolean(getClipVideoSource(playingClip));
+    if (hasMp4) return;
+
+    const startT = playingClip.startTime;
+    const endT = playingClip.endTime;
+    const interval = setInterval(() => {
+      setPlayheadMap((prev) => {
+        const cur = prev[playingClipId] ?? startT;
+        const next = cur + 0.15;
+        return {
+          ...prev,
+          [playingClipId]: next >= endT ? startT : next,
+        };
+      });
+    }, 150);
+
+    return () => clearInterval(interval);
+  }, [playingClipId, highlights, videoSource]);
+
+  const handleSeekClipToRelativeSec = async (clip: ClipHighlight, relSec: number) => {
+    const isPreClipped = Boolean(clip.clipVideoUrl);
+    const targetSec = isPreClipped
+      ? Math.max(0, relSec)
+      : Math.max(clip.startTime, Math.min(clip.endTime - 0.3, clip.startTime + relSec));
+
+    setPlayheadMap((prev) => ({ ...prev, [clip.id]: targetSec }));
+    const v = videoRefMap.current[clip.id];
+    if (v) {
+      try {
+        v.currentTime = targetSec;
+      } catch {}
+    }
+    if (playingClipId !== clip.id) {
+      await handleTogglePlay(clip, targetSec);
+    }
+  };
+
+  const handleTogglePlay = async (clip: ClipHighlight, explicitTarget?: number) => {
+    const isCurrentPlaying = playingClipId === clip.id && explicitTarget === undefined;
     const currentVid = videoRefMap.current[clip.id];
     const src = getClipVideoSource(clip);
+
+    if (!src && ytId) {
+      if (playingClipId && videoRefMap.current[playingClipId]) {
+        videoRefMap.current[playingClipId]?.pause();
+      }
+      if (isCurrentPlaying) {
+        setPlayingClipId(null);
+      } else {
+        setPlayheadMap((prev) => ({ ...prev, [clip.id]: explicitTarget ?? clip.startTime }));
+        setPlayingClipId(clip.id);
+      }
+      return;
+    }
 
     if (!src) {
       setVideoErrors((prev) => ({
         ...prev,
-        [clip.id]: 'Clip file not yet rendered. Click Re-clip 9:16 to render it.',
+        [clip.id]: 'Clip file not yet rendered. Click Re-clip 9:16 below.',
       }));
       return;
     }
@@ -104,8 +196,7 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
       return;
     }
 
-    // Pause any other currently playing video
-    if (playingClipId && videoRefMap.current[playingClipId]) {
+    if (playingClipId && playingClipId !== clip.id && videoRefMap.current[playingClipId]) {
       videoRefMap.current[playingClipId]?.pause();
     }
 
@@ -139,10 +230,9 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
         });
       }
 
-      if (
-        currentVid.currentTime < clipStart ||
-        currentVid.currentTime >= clipEnd - 0.2
-      ) {
+      if (explicitTarget !== undefined) {
+        currentVid.currentTime = explicitTarget;
+      } else if (currentVid.currentTime < clipStart || currentVid.currentTime >= clipEnd - 0.2) {
         currentVid.currentTime = clipStart;
       }
 
@@ -184,7 +274,7 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
           startTime: clip.startTime,
           duration: clipDur,
           resolution: '720p',
-          framingMode: clip.framingSuggestion || 'smart_crop',
+          framingMode: clip.framingSuggestion || settings.framingMode || 'smart_crop',
           title: clip.title,
           clipId: `${clip.id}_${Date.now()}`,
         }),
@@ -198,9 +288,7 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
         clipVideoUrl: data.downloadUrl,
         downloadUrl: data.downloadUrl,
       };
-      if (onClipUpdated) {
-        onClipUpdated(updated);
-      }
+      if (onClipUpdated) onClipUpdated(updated);
     } catch (err: any) {
       setVideoErrors((prev) => ({
         ...prev,
@@ -212,25 +300,12 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
   };
 
   const handleDirectDownload = async (clip: ClipHighlight) => {
-    setDownloadingClipId(clip.id);
-
-    if (clip.clipVideoUrl || clip.downloadUrl) {
-      const url = clip.clipVideoUrl || clip.downloadUrl!;
-      try {
-        const res = await fetch(url);
-        const blob = await res.blob();
-        downloadBlob(blob, `clipforge_${clip.id}.mp4`);
-      } catch {
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `clipforge_${clip.id}.mp4`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-      }
-      setDownloadingClipId(null);
+    if (!getClipVideoSource(clip) && ytId) {
+      onOpenExportModal(clip);
       return;
     }
+
+    setDownloadingClipId(clip.id);
 
     const clipDur = Math.max(5, Math.round(clip.endTime - clip.startTime));
     try {
@@ -244,9 +319,20 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
           startTime: clip.startTime,
           duration: clipDur,
           resolution: '720p',
-          framingMode: clip.framingSuggestion || 'smart_crop',
+          framingMode: clip.framingSuggestion || settings.framingMode || 'smart_crop',
+          panX: typeof clip.panX === 'number' ? clip.panX : settings.panX,
           title: clip.title,
-          clipId: clip.id,
+          clipId: `${clip.id}_opus`,
+          burnCaptions: true,
+          captions: clip.captions,
+          captionColor: settings.captionColor,
+          captionBaseColor: settings.captionBaseColor,
+          captionPosition: settings.captionPosition,
+          captionFontSize: settings.captionFontSize,
+          captionFontFamily: settings.captionFontFamily,
+          captionTextCase: settings.captionTextCase,
+          captionOutlineWidth: settings.captionOutlineWidth,
+          captionDropShadow: settings.captionDropShadow,
         }),
       });
 
@@ -305,11 +391,17 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
     }
   };
 
-  const handleCopyCaption = (clip: ClipHighlight) => {
-    const text = `${clip.title}\n\n"${clip.hook}"\n\n${clip.hashtags.join(' ')} #shorts #viral #reels #tiktok`;
+  const handleCopyDescription = (clip: ClipHighlight) => {
+    const text = `${clip.title}\n\n${clip.reason}\n\n"${clip.hook}"\n\n${clip.hashtags.join(' ')} #shorts #reels #tiktok`;
     navigator.clipboard.writeText(text);
     setCopiedId(clip.id);
     setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  const handleCopyHashtag = (key: string, tag: string) => {
+    navigator.clipboard.writeText(tag);
+    setCopiedHashtag(key);
+    setTimeout(() => setCopiedHashtag(null), 1400);
   };
 
   const handleCopySocialField = (key: string, val: string) => {
@@ -330,77 +422,212 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
     return `${mins}:${String(rem).padStart(2, '0')}`;
   };
 
+  // Current Opus custom subtitle settings
+  const highlightStyle: CaptionHighlightStyle = settings.captionHighlightStyle || 'active_box';
+  const accentColor = settings.captionColor || '#22C55E';
+  const baseColor = settings.captionBaseColor || '#FFFFFF';
+  const fontFamily = settings.captionFontFamily || 'Montserrat';
+  const textCase: CaptionTextCase = settings.captionTextCase || 'uppercase';
+
   return (
-    <div className="space-y-6">
-      {/* Top Studio Asset Overview */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-5 rounded-2xl bg-zinc-900/80 border border-zinc-800 shadow-lg">
-        <div className="space-y-1 min-w-0">
+    <div className="space-y-5">
+      {/* Top Opus-Style Project Header */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-5 rounded-2xl bg-zinc-900/90 border border-zinc-800">
+        <div className="space-y-1.5 min-w-0">
           <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-400">
-            <span className="font-semibold text-emerald-400 flex items-center gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse inline-block" />
-              Gemini AI Clips Ready
-            </span>
-            <span>·</span>
-            <span>{highlights.length} vertical 9:16 shorts</span>
-            <span>·</span>
-            <span className="font-mono tabular-nums">Source: {formatSeconds(videoSource.duration)}</span>
+            <span className="font-semibold text-emerald-400">Opus Results</span>
+            <span className="text-zinc-600">·</span>
+            <span className="tabular-nums font-medium text-zinc-200">{highlights.length} viral shorts</span>
+            <span className="text-zinc-600">·</span>
+            <span className="font-mono tabular-nums">Source {formatSeconds(videoSource.duration)}</span>
+            {topClip && (
+              <>
+                <span className="text-zinc-600">·</span>
+                <span className="font-mono tabular-nums text-emerald-400">
+                  Peak {topClip.viralityScore}/100
+                </span>
+              </>
+            )}
           </div>
-          <h2 className="text-base sm:text-lg font-semibold text-zinc-100 truncate max-w-xl">
+          <h2 className="text-base sm:text-lg font-semibold text-zinc-100 truncate">
             {videoSource.title}
           </h2>
-          {videoSource.aiSummary && (
-            <p className="text-xs text-zinc-400 line-clamp-1">{videoSource.aiSummary}</p>
+          {(videoSource.aiSummary || videoSource.description) && (
+            <p className="text-xs text-zinc-400 line-clamp-2 max-w-3xl leading-relaxed">
+              {videoSource.aiSummary || videoSource.description}
+            </p>
           )}
         </div>
 
-        <div className="flex items-center gap-3 shrink-0">
-          {topClip && (
-            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-950 border border-zinc-800 text-xs">
-              <TrendingUp className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="text-zinc-400">Top Virality:</span>
-              <span className="font-mono font-semibold text-emerald-400 tabular-nums">
-                {topClip.viralityScore}%
-              </span>
-            </div>
-          )}
+        <div className="flex items-center gap-2.5 shrink-0">
+          <button
+            onClick={() => setSortBy(sortBy === 'score' ? 'timeline' : 'score')}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-950 hover:bg-zinc-800 text-zinc-300 text-xs font-medium border border-zinc-800 transition-colors cursor-pointer"
+            title="Sort clips"
+          >
+            <ArrowUpDown className="w-3.5 h-3.5 text-emerald-400" />
+            <span>{sortBy === 'score' ? 'Score: High to Low' : 'Order: Timeline'}</span>
+          </button>
 
           <button
             onClick={onNewVideo}
-            className="px-3.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700/80 text-zinc-200 text-xs font-medium border border-zinc-700/80 transition-colors cursor-pointer"
+            className="px-3.5 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-semibold transition-colors cursor-pointer"
           >
             + Ingest New Video
           </button>
         </div>
       </div>
 
+      {/* Live Subtitle Style & Highlight Quick Form (applies live across all Feed cards & Studio) */}
+      <div className="p-3.5 rounded-xl bg-zinc-900/75 border border-zinc-800 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-xs text-zinc-300 font-medium">
+          <Highlighter className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+          <span>Subtitle Highlight:</span>
+          <div className="flex items-center gap-1 bg-zinc-950 p-0.5 rounded-lg border border-zinc-800">
+            {(
+              [
+                { id: 'active_box', label: 'Active Box' },
+                { id: 'text_color', label: 'Word Pop' },
+                { id: 'underline_glow', label: 'Underline' },
+                { id: 'dual_tone', label: 'Karaoke' },
+              ] as const
+            ).map((opt) => (
+              <button
+                key={opt.id}
+                onClick={() => onUpdateSettings({ captionHighlightStyle: opt.id })}
+                className={`px-2 py-1 rounded text-[11px] font-medium transition-colors cursor-pointer ${
+                  highlightStyle === opt.id
+                    ? 'bg-zinc-800 text-white font-semibold'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] text-zinc-400">Highlight Color:</span>
+            {['#22C55E', '#FACC15', '#8B5CF6', '#06B6D4', '#F97316', '#F43F5E'].map((hex) => (
+              <button
+                key={hex}
+                onClick={() => onUpdateSettings({ captionColor: hex })}
+                className={`w-4 h-4 rounded-full border transition-transform cursor-pointer ${
+                  accentColor.toUpperCase() === hex ? 'scale-125 border-white' : 'border-zinc-700'
+                }`}
+                style={{ backgroundColor: hex }}
+                title={`Set highlight ${hex}`}
+              />
+            ))}
+          </div>
+
+          <select
+            value={textCase}
+            onChange={(e) => onUpdateSettings({ captionTextCase: e.target.value as CaptionTextCase })}
+            aria-label="Subtitle Text Case"
+            className="px-2 py-1 bg-zinc-950 border border-zinc-800 rounded-lg text-[11px] text-zinc-300 focus:outline-none focus:border-emerald-500 cursor-pointer"
+          >
+            <option value="uppercase">ALL CAPS</option>
+            <option value="titlecase">Title Case</option>
+            <option value="original">As Spoken</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Live YouTube Vertical Player Info Strip */}
+      {videoSource.youtubeDownloadBlocked && ytId && !videoSource.playableSourceUrl && (
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-4 py-3 rounded-xl bg-zinc-900 border border-zinc-800 text-xs text-zinc-300">
+          <div className="flex items-center gap-2">
+            <Youtube className="w-4 h-4 text-red-500 shrink-0" />
+            <span>
+              Live YouTube 9:16 Vertical Player active with Gemini AI hooks & synced word-highlighted captions. Upload a local MP4 anytime for direct MP4 exports.
+            </span>
+          </div>
+          <button
+            onClick={onNewVideo}
+            className="text-emerald-400 hover:text-emerald-300 font-medium shrink-0 cursor-pointer"
+          >
+            Upload Local MP4 →
+          </button>
+        </div>
+      )}
+
+      {/* Ask Gemini AI to Clip More */}
+      {onGenerateMoreClips && (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (isAiGenerating) return;
+            onGenerateMoreClips(morePrompt.trim(), moreCount);
+            setMorePrompt('');
+          }}
+          className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 p-3 rounded-xl bg-zinc-900/80 border border-zinc-800"
+        >
+          <div className="relative flex-1 flex items-center">
+            <Sparkles className="w-3.5 h-3.5 text-violet-400 absolute left-3 pointer-events-none" />
+            <input
+              type="text"
+              value={morePrompt}
+              onChange={(e) => setMorePrompt(e.target.value)}
+              disabled={isAiGenerating}
+              placeholder="Extract custom clips with Gemini AI (e.g. '3 fast 15s reactions' or 'key debate clash')..."
+              className="w-full pl-9 pr-3 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-violet-500 disabled:opacity-60"
+            />
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <select
+              value={moreCount}
+              onChange={(e) => setMoreCount(Number(e.target.value))}
+              disabled={isAiGenerating}
+              aria-label="Number of additional clips"
+              className="px-2.5 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-xs text-zinc-200 focus:outline-none focus:border-violet-500 cursor-pointer"
+            >
+              <option value={1}>+1 Clip</option>
+              <option value={3}>+3 Clips</option>
+              <option value={5}>+5 Clips</option>
+              <option value={8}>+8 Clips</option>
+            </select>
+
+            <button
+              type="submit"
+              disabled={isAiGenerating}
+              className="px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+            >
+              {isAiGenerating ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Clipping...</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>AI Clip More</span>
+                </>
+              )}
+            </button>
+          </div>
+        </form>
+      )}
+
       {/* Category Filter Tabs */}
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex flex-wrap items-center gap-1.5 p-1 rounded-lg bg-zinc-900 border border-zinc-800">
+        <div className="flex flex-wrap items-center gap-1 p-1 rounded-lg bg-zinc-900 border border-zinc-800">
           {[
             { id: 'all', label: `All Clips (${highlights.length})` },
-            {
-              id: 'funny',
-              label: `Humor (${highlights.filter((c) => c.category === 'funny').length})`,
-            },
-            {
-              id: 'highlight',
-              label: `Climax (${highlights.filter((c) => c.category === 'highlight').length})`,
-            },
-            {
-              id: 'educational',
-              label: `Insights (${highlights.filter((c) => c.category === 'educational').length})`,
-            },
-            {
-              id: 'debate',
-              label: `Debate (${highlights.filter((c) => c.category === 'debate').length})`,
-            },
+            { id: 'funny', label: `Humor (${highlights.filter((c) => c.category === 'funny').length})` },
+            { id: 'highlight', label: `Climax (${highlights.filter((c) => c.category === 'highlight').length})` },
+            { id: 'educational', label: `Insights (${highlights.filter((c) => c.category === 'educational').length})` },
+            { id: 'debate', label: `Debate (${highlights.filter((c) => c.category === 'debate').length})` },
           ].map((tab) => (
             <button
               key={tab.id}
               onClick={() => setSelectedCategory(tab.id)}
               className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer ${
                 selectedCategory === tab.id
-                  ? 'bg-zinc-800 text-white shadow-sm font-semibold'
+                  ? 'bg-zinc-800 text-white font-semibold'
                   : 'text-zinc-400 hover:text-zinc-200'
               }`}
             >
@@ -409,13 +636,13 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
           ))}
         </div>
 
-        <span className="text-xs text-zinc-500 hidden sm:inline font-mono">
-          9:16 Vertical TikTok / Shorts Format
+        <span className="text-[11px] text-zinc-500 font-mono">
+          Ranked Opus Split View · Click transcript words to seek
         </span>
       </div>
 
-      {/* Grid of Clips */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      {/* OpusClip Signature Ranked Horizontal Split Rows */}
+      <div className="space-y-5">
         {filtered.map((clip, index) => {
           const duration = Math.max(1, Math.round(clip.endTime - clip.startTime));
           const isPlaying = playingClipId === clip.id;
@@ -423,31 +650,45 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
           const videoSrc = getClipVideoSource(clip);
           const clipError = videoErrors[clip.id];
 
-          const rawPlayhead =
-            playheadMap[clip.id] ?? (isPreClipped ? 0 : clip.startTime);
-          const relSec = isPreClipped
-            ? rawPlayhead
-            : Math.max(0, rawPlayhead - clip.startTime);
-          const progressPct = Math.max(
-            0,
-            Math.min(100, (relSec / duration) * 100)
-          );
+          const rawPlayhead = playheadMap[clip.id] ?? (isPreClipped ? 0 : clip.startTime);
+          const relSec = isPreClipped ? rawPlayhead : Math.max(0, rawPlayhead - clip.startTime);
+          const progressPct = Math.max(0, Math.min(100, (relSec / duration) * 100));
 
           const activeCaption =
-            clip.captions.find((c) => relSec >= c.start && relSec <= c.end) ||
-            clip.captions[0];
+            clip.captions.find((c) => relSec >= c.start && relSec <= c.end) || clip.captions[0];
+
+          const activeTokens = activeCaption
+            ? activeCaption.words && activeCaption.words.length > 0
+              ? activeCaption.words
+              : activeCaption.text
+                  .split(/\s+/)
+                  .filter(Boolean)
+                  .map((w, wi, arr) => {
+                    const seg = (activeCaption.end - activeCaption.start) / Math.max(1, arr.length);
+                    return {
+                      w,
+                      start: activeCaption.start + wi * seg,
+                      end: activeCaption.start + (wi + 1) * seg,
+                    };
+                  })
+            : [];
+
+          const hookMetric = clip.hookScore ?? Math.min(100, clip.viralityScore + 1);
+          const flowMetric = clip.flowScore ?? Math.max(82, clip.viralityScore - 2);
+          const emotionMetric = clip.emotionScore ?? Math.max(80, clip.viralityScore - 3);
+          const trendMetric = Math.max(84, Math.min(99, Math.round((hookMetric + clip.viralityScore) / 2)));
 
           return (
-            <div
+            <article
               key={clip.id}
-              className="group rounded-2xl bg-zinc-900/70 border border-zinc-800 hover:border-zinc-700/90 shadow-lg overflow-hidden flex flex-col justify-between transition-all duration-200"
+              className="rounded-2xl bg-zinc-900/75 border border-zinc-800 hover:border-zinc-700 transition-colors overflow-hidden flex flex-col md:flex-row"
             >
-              {/* Vertical 9:16 Video Player Container */}
-              <div className="relative aspect-[9/13] bg-zinc-950 overflow-hidden flex items-center justify-center select-none">
+              {/* LEFT: Clean Uncluttered 9:16 Vertical Player with Live Word-Highlighted Subtitles */}
+              <div className="relative w-full md:w-[255px] lg:w-[275px] aspect-[9/16] shrink-0 bg-black border-b md:border-b-0 md:border-r border-zinc-800 overflow-hidden select-none group">
                 {videoSrc ? (
                   <div
                     onClick={() => handleTogglePlay(clip)}
-                    className="relative w-full h-full cursor-pointer flex items-center justify-center"
+                    className="relative w-full h-full cursor-pointer"
                   >
                     <video
                       ref={(el) => {
@@ -468,13 +709,12 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
                         setPlayingClipId((prev) => (prev === clip.id ? null : prev));
                         setVideoErrors((prev) => ({
                           ...prev,
-                          [clip.id]: 'Video source failed to load. Click Re-clip 9:16 below.',
+                          [clip.id]: 'Video source failed to load. Click Re-clip 9:16.',
                         }));
                       }}
                       onTimeUpdate={(e) => {
                         const v = e.currentTarget;
                         setPlayheadMap((prev) => ({ ...prev, [clip.id]: v.currentTime }));
-
                         if (isPreClipped) {
                           if (v.duration && v.currentTime >= v.duration - 0.15) {
                             v.currentTime = 0;
@@ -485,37 +725,57 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
                           v.play().catch(() => {});
                         }
                       }}
-                      className={`w-full h-full object-cover transition-opacity duration-300 ${
-                        isPlaying ? 'opacity-100' : 'opacity-90 group-hover:opacity-100'
-                      }`}
+                      className="w-full h-full object-cover"
                     />
                   </div>
+                ) : ytId ? (
+                  <div
+                    onClick={() => !isPlaying && handleTogglePlay(clip)}
+                    className="relative w-full h-full flex items-center justify-center bg-black overflow-hidden cursor-pointer"
+                  >
+                    {isPlaying ? (
+                      <iframe
+                        key={`${clip.id}-${isMuted ? 'm' : 'u'}`}
+                        src={`https://www.youtube.com/embed/${ytId}?start=${Math.floor(clip.startTime)}&end=${Math.ceil(clip.endTime)}&autoplay=1&rel=0&modestbranding=1&playsinline=1&mute=${isMuted ? 1 : 0}`}
+                        title={clip.title}
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                        allowFullScreen
+                        className="h-full w-[320%] max-w-none border-0 pointer-events-auto"
+                      />
+                    ) : (
+                      <img
+                        src={videoSource.thumbnail || `https://img.youtube.com/vi/${ytId}/hqdefault.jpg`}
+                        alt={clip.title}
+                        referrerPolicy="no-referrer"
+                        className="w-full h-full object-cover opacity-90 group-hover:opacity-100 transition-opacity"
+                      />
+                    )}
+                  </div>
                 ) : (
-                  <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center space-y-3">
-                    <p className="text-xs text-zinc-400">Preview segment requires 9:16 render</p>
+                  <div className="w-full h-full flex flex-col items-center justify-center p-5 text-center space-y-3">
+                    <p className="text-xs text-zinc-400">Preview requires 9:16 render</p>
                     <button
                       onClick={() => handleReclip(clip)}
                       disabled={reclippingId === clip.id}
-                      className="px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-xs font-medium cursor-pointer flex items-center gap-1.5"
+                      className="px-3 py-1.5 rounded-lg bg-emerald-500 text-zinc-950 text-xs font-semibold cursor-pointer flex items-center gap-1.5"
                     >
                       {reclippingId === clip.id ? (
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
                       ) : (
                         <RefreshCw className="w-3.5 h-3.5" />
                       )}
-                      <span>Render 9:16 Clip</span>
+                      <span>Render 9:16</span>
                     </button>
                   </div>
                 )}
 
-                {/* Video Error Overlay */}
                 {clipError && (
-                  <div className="absolute inset-0 z-30 bg-zinc-950/90 p-5 flex flex-col items-center justify-center text-center space-y-3">
+                  <div className="absolute inset-0 z-30 bg-zinc-950/90 p-4 flex flex-col items-center justify-center text-center space-y-3">
                     <p className="text-xs text-rose-300">{clipError}</p>
                     <button
                       onClick={() => handleReclip(clip)}
                       disabled={reclippingId === clip.id}
-                      className="px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                      className="px-3 py-1.5 rounded-lg bg-emerald-500 text-zinc-950 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
                     >
                       {reclippingId === clip.id ? (
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -527,88 +787,111 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
                   </div>
                 )}
 
-                {/* 9:16 In-Video Overlay with Viral Hook & Dynamic Subtitle Preview */}
-                <div className="absolute inset-0 bg-gradient-to-t from-zinc-950/90 via-transparent to-black/60 p-3.5 flex flex-col justify-between pointer-events-none z-10">
-                  {/* Top Bar Metadata */}
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-black/80 backdrop-blur-sm border border-zinc-700/80 text-xs font-mono tabular-nums text-zinc-200">
-                      <span className="text-emerald-400 font-semibold">{clip.viralityScore}%</span>
-                      <span className="text-zinc-500">score</span>
-                    </div>
-
-                    <div className="px-2 py-0.5 rounded-md bg-black/80 backdrop-blur-sm border border-zinc-700/80 text-[11px] font-mono tabular-nums text-zinc-300">
-                      {formatSeconds(clip.startTime)}–{formatSeconds(clip.endTime)} ({duration}s)
-                    </div>
-                  </div>
-
-                  {/* Top Center: Viral Hook Sticker */}
-                  <div className="p-2 rounded-lg bg-black/85 backdrop-blur-sm border border-violet-500/40 shadow-xl text-center">
-                    <span className="text-[10px] uppercase font-mono tracking-wider text-violet-400 block mb-0.5">
-                      Viral Hook Line
-                    </span>
-                    <p className="text-xs font-medium text-white line-clamp-2">
-                      "{clip.hook}"
-                    </p>
-                  </div>
-
-                  {/* Bottom: Dynamic Kinetic Subtitle */}
-                  <div className="text-center pb-2">
-                    {activeCaption && (
-                      <div
-                        key={`${clip.id}-${activeCaption.start}`}
-                        className="inline-block px-2.5 py-1 rounded-lg bg-black/90 backdrop-blur-sm border border-zinc-700 text-xs font-semibold text-white shadow-lg anim-entrance-pop max-w-[92%]"
-                      >
-                        {activeCaption.emphasisWord && (
-                          <span className="text-amber-300 mr-1 font-bold">
-                            {activeCaption.emphasisWord}
-                          </span>
-                        )}
-                        <span>{activeCaption.text}</span>
-                      </div>
-                    )}
-                  </div>
+                {/* Top corner duration pill */}
+                <div className="absolute top-3 right-3 z-20 px-2 py-0.5 rounded bg-black/75 text-[11px] font-mono tabular-nums text-zinc-200 pointer-events-none">
+                  {formatSeconds(duration)}
                 </div>
 
-                {/* Interactive Bottom Progress Scrubber Bar */}
-                {videoSrc && (
+                {/* Live Opus Word-Highlighted Subtitle Overlay at Lower Third (Clean, zero face-blocking sticker) */}
+                {activeCaption && (
+                  <div className="absolute bottom-7 left-3 right-3 z-20 flex justify-center pointer-events-none">
+                    <div
+                      key={`${clip.id}-${activeCaption.start}`}
+                      className={`flex flex-wrap items-center justify-center gap-1 px-2 py-1 rounded-lg text-center ${
+                        settings.captionPreset === 'minimal_cinema' ? 'bg-black/75' : ''
+                      }`}
+                      style={{ fontFamily: `"${fontFamily}", "Montserrat", sans-serif` }}
+                    >
+                      {activeTokens.map((tok, wi) => {
+                        const isWordActive = relSec >= tok.start && relSec <= tok.end;
+                        const isWordSpoken = relSec >= tok.start;
+                        const label = formatCaptionCase(tok.w, textCase);
+                        const boxContrast =
+                          accentColor.toUpperCase() === '#FACC15' ||
+                          accentColor.toUpperCase() === '#FFFFFF'
+                            ? '#09090B'
+                            : '#FFFFFF';
+
+                        return (
+                          <span
+                            key={wi}
+                            className="text-sm font-black leading-tight tracking-wide transition-all duration-100 inline-block"
+                            style={{
+                              color:
+                                highlightStyle === 'active_box' && isWordActive
+                                  ? boxContrast
+                                  : highlightStyle === 'dual_tone'
+                                  ? isWordSpoken
+                                    ? accentColor
+                                    : baseColor
+                                  : isWordActive && highlightStyle !== 'none'
+                                  ? accentColor
+                                  : baseColor,
+                              backgroundColor:
+                                highlightStyle === 'active_box' && isWordActive
+                                  ? accentColor
+                                  : 'transparent',
+                              padding:
+                                highlightStyle === 'active_box' && isWordActive ? '1px 6px' : '1px 1px',
+                              borderRadius:
+                                highlightStyle === 'active_box' && isWordActive ? '5px' : undefined,
+                              borderBottom:
+                                highlightStyle === 'underline_glow' && isWordActive
+                                  ? `2.5px solid ${accentColor}`
+                                  : '2.5px solid transparent',
+                              textShadow:
+                                highlightStyle === 'active_box' && isWordActive
+                                  ? 'none'
+                                  : '0 2px 5px rgba(0,0,0,0.95), 0 0 2px #000',
+                            }}
+                          >
+                            {label}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Scrubber Bar */}
+                {(videoSrc || ytId) && (
                   <div
                     onClick={(e) => {
                       e.stopPropagation();
                       const v = videoRefMap.current[clip.id];
-                      if (!v) return;
                       const rect = e.currentTarget.getBoundingClientRect();
                       const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
                       const target = isPreClipped
-                        ? ratio * (v.duration || duration)
+                        ? ratio * (v?.duration || duration)
                         : clip.startTime + ratio * duration;
-                      v.currentTime = target;
+                      if (v) v.currentTime = target;
                       setPlayheadMap((prev) => ({ ...prev, [clip.id]: target }));
                     }}
-                    className="absolute bottom-0 left-0 right-0 h-2 bg-zinc-800/80 z-30 cursor-pointer group/bar"
-                    title="Click to scrub"
+                    className="absolute bottom-0 left-0 right-0 h-1.5 bg-zinc-800/80 z-30 cursor-pointer"
+                    title="Scrub video"
                   >
                     <div
-                      className="h-full bg-violet-500 transition-[width] duration-75"
-                      style={{ width: `${progressPct}%` }}
+                      className="h-full transition-[width] duration-75"
+                      style={{ width: `${progressPct}%`, backgroundColor: accentColor }}
                     />
                   </div>
                 )}
 
-                {/* Center Play Button */}
-                {!isPlaying && !clipError && videoSrc && (
+                {/* Center Play Trigger */}
+                {!isPlaying && !clipError && (videoSrc || ytId) && (
                   <div
                     onClick={() => handleTogglePlay(clip)}
-                    className="absolute inset-0 flex items-center justify-center cursor-pointer z-20 bg-black/20 hover:bg-black/10 transition-colors"
+                    className="absolute inset-0 flex items-center justify-center cursor-pointer z-20 bg-black/15 hover:bg-black/5 transition-colors"
                   >
-                    <div className="w-12 h-12 rounded-full bg-white text-zinc-950 flex items-center justify-center shadow-xl group-hover:scale-105 transition-transform">
+                    <div className="w-12 h-12 rounded-full bg-white/95 text-zinc-950 flex items-center justify-center shadow-xl group-hover:scale-105 transition-transform">
                       <Play className="w-5 h-5 ml-0.5 fill-zinc-950" />
                     </div>
                   </div>
                 )}
 
-                {/* Active Playing Controls */}
+                {/* Active Playback Controls */}
                 {isPlaying && (
-                  <div className="absolute bottom-3 right-3 z-30 flex items-center gap-1.5 pointer-events-auto">
+                  <div className="absolute top-3 left-3 z-30 flex items-center gap-1.5">
                     <button
                       onClick={() => handleTogglePlay(clip)}
                       className="p-1.5 rounded-md bg-black/80 hover:bg-black text-white border border-zinc-700 cursor-pointer"
@@ -622,6 +905,8 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
                         if (v) {
                           v.muted = !v.muted;
                           setIsMuted(v.muted);
+                        } else {
+                          setIsMuted((prev) => !prev);
                         }
                       }}
                       className="p-1.5 rounded-md bg-black/80 hover:bg-black text-white border border-zinc-700 cursor-pointer"
@@ -637,51 +922,204 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
                 )}
               </div>
 
-              {/* Card Body & Details */}
-              <div className="p-4 space-y-3 flex-1 flex flex-col justify-between">
-                <div className="space-y-2">
-                  <div className="flex items-baseline justify-between text-xs">
-                    <span className="text-[11px] font-mono text-zinc-400 uppercase tracking-wider">
-                      Clip #{index + 1} · {clip.category}
-                    </span>
-                    <span className="text-[11px] font-mono text-zinc-400 tabular-nums">
-                      Hook {clip.hookScore || 94}% · Flow {clip.flowScore || 91}%
-                    </span>
+              {/* RIGHT: OpusClip Editorial Video Description, Score Breakdown & Word-Highlighted Transcript */}
+              <div className="flex-1 p-5 sm:p-6 flex flex-col justify-between gap-4 min-w-0">
+                <div className="space-y-4">
+                  {/* Top Row: Rank, Time Metadata & Opus Virality Score */}
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="space-y-1 min-w-0">
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-400">
+                        <span className="font-mono font-semibold text-emerald-400 tabular-nums">
+                          #{index + 1}
+                        </span>
+                        <span className="text-zinc-600">·</span>
+                        <span className="font-mono tabular-nums">
+                          {formatSeconds(clip.startTime)} – {formatSeconds(clip.endTime)} ({duration}s)
+                        </span>
+                        <span className="text-zinc-600">·</span>
+                        <span className="capitalize">{clip.category}</span>
+                        <span className="text-zinc-600">·</span>
+                        <span className="font-mono text-[11px] text-zinc-500">
+                          {clip.framingSuggestion || 'smart_crop'}
+                        </span>
+                      </div>
+
+                      <h3 className="text-base sm:text-lg font-semibold text-zinc-100 leading-snug">
+                        {clip.title}
+                      </h3>
+                    </div>
+
+                    {/* Virality Score Metric */}
+                    <div className="text-right shrink-0 pl-3 border-l border-zinc-800">
+                      <div className="text-[10px] font-mono uppercase tracking-wider text-zinc-500">
+                        Virality Score
+                      </div>
+                      <div className="flex items-baseline justify-end gap-0.5 tabular-nums">
+                        <span
+                          className={`text-2xl sm:text-3xl font-bold tracking-tight ${
+                            clip.viralityScore >= 90 ? 'text-emerald-400' : 'text-amber-400'
+                          }`}
+                        >
+                          {clip.viralityScore}
+                        </span>
+                        <span className="text-xs font-mono text-zinc-500">/100</span>
+                      </div>
+                    </div>
                   </div>
 
-                  <h3 className="text-xs sm:text-sm font-semibold text-zinc-100 group-hover:text-violet-300 transition-colors line-clamp-2">
-                    {clip.title}
-                  </h3>
+                  {/* 4-Metric Opus Virality Breakdown */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-1">
+                    {[
+                      { label: 'Hook', val: hookMetric },
+                      { label: 'Flow', val: flowMetric },
+                      { label: 'Engagement', val: emotionMetric },
+                      { label: 'Trend', val: trendMetric },
+                    ].map((m) => (
+                      <div key={m.label} className="space-y-1">
+                        <div className="flex items-center justify-between text-[11px]">
+                          <span className="text-zinc-400">{m.label}</span>
+                          <span className="font-mono font-semibold text-zinc-200 tabular-nums">
+                            {m.val}
+                          </span>
+                        </div>
+                        <div className="w-full h-1.5 rounded-full bg-zinc-800 overflow-hidden">
+                          <div
+                            className="h-full rounded-full bg-emerald-400"
+                            style={{ width: `${m.val}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
 
-                  <div className="p-2.5 rounded-lg bg-zinc-950 border border-zinc-800 text-[11px] text-zinc-400 space-y-1">
-                    <div className="text-[10px] font-mono text-zinc-400 flex items-center gap-1 uppercase">
-                      <Sparkles className="w-3 h-3 text-violet-400" />
-                      <span>Why Gemini Picked This</span>
+                  {/* Structured Video Description + Opening Hook + Copyable Hashtags */}
+                  <div className="space-y-2 pt-2 border-t border-zinc-800/80">
+                    <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
+                      Video Description & Viral Rationale
                     </div>
-                    <p className="line-clamp-2">{clip.reason}</p>
+                    <p className="text-xs sm:text-sm text-zinc-300 leading-relaxed">
+                      {clip.reason}
+                    </p>
+                    <div className="text-xs text-zinc-400">
+                      <span className="text-zinc-500 font-medium">Opening Hook: </span>
+                      <span className="text-zinc-200 italic">"{clip.hook}"</span>
+                    </div>
+
+                    {clip.hashtags && clip.hashtags.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 pt-0.5 text-[11px] font-mono text-emerald-400/90">
+                        <Hash className="w-3 h-3 text-zinc-500 shrink-0" />
+                        {clip.hashtags.map((tag, ti) => {
+                          const key = `${clip.id}-${ti}`;
+                          return (
+                            <button
+                              key={key}
+                              onClick={() => handleCopyHashtag(key, tag)}
+                              className="hover:text-emerald-300 transition-colors cursor-pointer"
+                              title="Click to copy hashtag"
+                            >
+                              {copiedHashtag === key ? `${tag} ✓` : tag}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Interactive Word-Highlighted Transcript */}
+                  <div className="space-y-1.5 pt-2 border-t border-zinc-800/80">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="font-semibold uppercase tracking-wider text-zinc-400">
+                        Transcript & Active Highlights
+                      </span>
+                      <span className="text-zinc-500">Click any line to seek</span>
+                    </div>
+
+                    <div className="max-h-36 overflow-y-auto pr-1 space-y-1.5 text-xs leading-relaxed">
+                      {clip.captions.map((chunk, ci) => {
+                        const tokens =
+                          chunk.words && chunk.words.length > 0
+                            ? chunk.words
+                            : chunk.text
+                                .split(/\s+/)
+                                .filter(Boolean)
+                                .map((w, wi, arr) => {
+                                  const seg = (chunk.end - chunk.start) / Math.max(1, arr.length);
+                                  return {
+                                    w,
+                                    start: chunk.start + wi * seg,
+                                    end: chunk.start + (wi + 1) * seg,
+                                  };
+                                });
+
+                        return (
+                          <div
+                            key={ci}
+                            onClick={() => handleSeekClipToRelativeSec(clip, chunk.start)}
+                            className="flex items-start gap-2.5 p-1.5 rounded-lg hover:bg-zinc-800/50 transition-colors cursor-pointer"
+                          >
+                            <span className="font-mono text-[10px] text-zinc-500 tabular-nums pt-0.5 shrink-0">
+                              {formatSeconds(clip.startTime + chunk.start)}
+                            </span>
+                            <p className="flex-1 flex flex-wrap gap-x-1 gap-y-0.5 text-zinc-300">
+                              {tokens.map((tok, wi) => {
+                                const isActiveWord =
+                                  isPlaying && relSec >= tok.start && relSec <= tok.end;
+                                const isEmphasis =
+                                  chunk.emphasisWord &&
+                                  tok.w.toUpperCase().includes(chunk.emphasisWord.toUpperCase());
+
+                                return (
+                                  <span
+                                    key={wi}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleSeekClipToRelativeSec(clip, tok.start);
+                                    }}
+                                    className={`rounded px-0.5 transition-colors ${
+                                      isActiveWord
+                                        ? 'font-semibold text-zinc-950'
+                                        : isEmphasis
+                                        ? 'text-emerald-300 font-medium underline decoration-emerald-500/50 underline-offset-2'
+                                        : 'hover:text-white'
+                                    }`}
+                                    style={
+                                      isActiveWord
+                                        ? { backgroundColor: accentColor }
+                                        : undefined
+                                    }
+                                  >
+                                    {tok.w}
+                                  </span>
+                                );
+                              })}
+                            </p>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                 </div>
 
-                {/* Primary Actions */}
-                <div className="pt-2 border-t border-zinc-800/80 space-y-2">
-                  <div className="grid grid-cols-2 gap-2">
+                {/* Action Footer */}
+                <div className="pt-3 border-t border-zinc-800 flex flex-wrap items-center justify-between gap-2.5">
+                  <div className="flex flex-wrap items-center gap-2">
                     <button
                       onClick={() => onSelectClipToEdit(clip)}
-                      className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-xs font-semibold shadow-sm transition-colors cursor-pointer"
+                      className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-semibold transition-colors cursor-pointer"
                     >
                       <Sliders className="w-3.5 h-3.5" />
-                      <span>Studio 9:16</span>
+                      <span>Edit in Studio</span>
                     </button>
 
                     <button
                       onClick={() => handleDirectDownload(clip)}
                       disabled={downloadingClipId === clip.id}
-                      className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium border border-zinc-700/80 transition-colors cursor-pointer disabled:opacity-50"
+                      className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-xs font-medium border border-zinc-700 transition-colors cursor-pointer disabled:opacity-50"
                     >
                       {downloadingClipId === clip.id ? (
                         <>
                           <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          <span>Clipping...</span>
+                          <span>Exporting...</span>
                         </>
                       ) : (
                         <>
@@ -692,29 +1130,28 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
                     </button>
                   </div>
 
-                  {/* Secondary Quick Utilities */}
-                  <div className="flex items-center justify-between text-[11px] text-zinc-400 pt-0.5">
+                  <div className="flex items-center gap-3 text-xs text-zinc-400">
                     <button
                       onClick={() => handleOpenSocialPack(clip)}
-                      className="flex items-center gap-1 text-violet-400 hover:text-violet-300 transition-colors cursor-pointer font-medium"
+                      className="flex items-center gap-1 text-violet-400 hover:text-violet-300 font-medium transition-colors cursor-pointer"
                     >
-                      <Share2 className="w-3 h-3" />
+                      <Share2 className="w-3.5 h-3.5" />
                       <span>AI Social Copy</span>
                     </button>
 
                     <button
-                      onClick={() => handleCopyCaption(clip)}
+                      onClick={() => handleCopyDescription(clip)}
                       className="flex items-center gap-1 hover:text-zinc-200 transition-colors cursor-pointer"
                     >
                       {copiedId === clip.id ? (
                         <>
-                          <Check className="w-3 h-3 text-emerald-400" />
-                          <span className="text-emerald-400 font-medium">Copied!</span>
+                          <Check className="w-3.5 h-3.5 text-emerald-400" />
+                          <span className="text-emerald-400 font-medium">Copied</span>
                         </>
                       ) : (
                         <>
-                          <Copy className="w-3 h-3" />
-                          <span>Tags</span>
+                          <Copy className="w-3.5 h-3.5" />
+                          <span>Copy Description</span>
                         </>
                       )}
                     </button>
@@ -723,13 +1160,13 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
                       onClick={() => handleDownloadSrt(clip)}
                       className="flex items-center gap-1 hover:text-zinc-200 transition-colors cursor-pointer"
                     >
-                      <FileText className="w-3 h-3" />
+                      <FileText className="w-3.5 h-3.5" />
                       <span>.SRT</span>
                     </button>
                   </div>
                 </div>
               </div>
-            </div>
+            </article>
           );
         })}
       </div>
@@ -784,7 +1221,7 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
                         <span className="font-semibold text-zinc-300">{item.label}</span>
                         <button
                           onClick={() => handleCopySocialField(item.key, item.val)}
-                          className="flex items-center gap-1 text-violet-400 hover:text-violet-300 cursor-pointer"
+                          className="flex items-center gap-1 text-emerald-400 hover:text-emerald-300 cursor-pointer"
                         >
                           {copiedSocialField === item.key ? (
                             <>

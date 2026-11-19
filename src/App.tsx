@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { SAMPLE_VIDEOS } from './data/sampleVideos';
-import { VideoSource, ClipHighlight, ExportSettings } from './types';
+import { VideoSource, ClipHighlight, ExportSettings, ClipGenerationOptions } from './types';
 import { Header } from './components/Header';
 import { OpusClipHero } from './components/OpusClipHero';
 import { OpusClipFeed } from './components/OpusClipFeed';
@@ -11,7 +11,9 @@ import { TimelineTrimmer } from './components/TimelineTrimmer';
 import { TranscriptEditor } from './components/TranscriptEditor';
 import { VideoImportModal } from './components/VideoImportModal';
 import { ExportModal } from './components/ExportModal';
-import { Sparkles, Sliders, FileText, ArrowLeft, RefreshCw, Loader2 } from 'lucide-react';
+import { VideoEffectsPanel } from './components/VideoEffectsPanel';
+import { AiDirectorDrawer, DirectorActions } from './components/AiDirectorDrawer';
+import { Sparkles, Sliders, FileText, ArrowLeft, RefreshCw, Loader2, Palette } from 'lucide-react';
 
 export default function App() {
   const [appMode, setAppMode] = useState<'generator' | 'feed' | 'studio'>('generator');
@@ -31,24 +33,36 @@ export default function App() {
     resolution: '1080p',
     framerate: 30,
     framingMode: 'smart_crop',
-    captionPreset: 'hormozi',
-    captionColor: '#FACC15',
+    captionPreset: 'opus_box',
+    captionHighlightStyle: 'active_box',
+    captionColor: '#22C55E',
+    captionBaseColor: '#FFFFFF',
+    captionFontFamily: 'Montserrat',
+    captionTextCase: 'uppercase',
+    captionOutlineWidth: 6,
+    captionWordsPerLine: 'multi_line',
+    captionDropShadow: true,
     captionPosition: 'lower_third',
     captionFontSize: 32,
     captionEntranceAnim: 'pop',
     captionExitAnim: 'fade',
-    showHookBanner: true,
+    showHookBanner: false,
     hookBannerText: SAMPLE_VIDEOS[0].highlights[0].hook,
     showProgressBar: true,
-    progressBarColor: '#EF4444',
+    progressBarColor: '#22C55E',
     panX: 0,
+    videoFilter: 'none',
+    filterBrightness: 100,
+    filterContrast: 100,
+    filterSaturate: 100,
   });
 
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [isDirectorOpen, setIsDirectorOpen] = useState(false);
   const [isAiScanning, setIsAiScanning] = useState(false);
   const [isReclippingStudio, setIsReclippingStudio] = useState(false);
-  const [rightPanelTab, setRightPanelTab] = useState<'style' | 'transcript'>('style');
+  const [rightPanelTab, setRightPanelTab] = useState<'style' | 'effects' | 'transcript'>('style');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -64,6 +78,7 @@ export default function App() {
       ...prev,
       hookBannerText: clip.hook,
       framingMode: clip.framingSuggestion || prev.framingMode,
+      panX: typeof clip.panX === 'number' ? clip.panX : prev.panX,
     }));
     setCurrentTime(clip.startTime);
 
@@ -113,6 +128,10 @@ export default function App() {
   };
 
   const handleReclipInStudio = async () => {
+    if (currentVideo.youtubeDownloadBlocked && !currentVideo.playableSourceUrl && !activeClip.clipVideoUrl) {
+      showToast('Trim timestamps updated on live YouTube 9:16 player. Upload an MP4 to render a standalone file.');
+      return;
+    }
     setIsReclippingStudio(true);
     try {
       const clipDur = Math.max(5, Math.round(activeClip.endTime - activeClip.startTime));
@@ -130,6 +149,13 @@ export default function App() {
           panX: settings.panX,
           title: activeClip.title,
           clipId: `${activeClip.id}_trim_${Date.now()}`,
+          burnCaptions: false,
+          captionColor: settings.captionColor,
+          captionBaseColor: settings.captionBaseColor,
+          captionFontFamily: settings.captionFontFamily,
+          captionTextCase: settings.captionTextCase,
+          captionOutlineWidth: settings.captionOutlineWidth,
+          captionDropShadow: settings.captionDropShadow,
         }),
       });
       const data = await res.json();
@@ -165,25 +191,25 @@ export default function App() {
     }
   };
 
-  const handleGenerateClips = async (options: {
-    videoSource: VideoSource;
-    focusCategory: string;
-    targetLength: string;
-  }) => {
+  const handleGenerateClips = async (options: ClipGenerationOptions) => {
     let video: VideoSource = { ...options.videoSource };
     let chapters: any[] = [];
+    const appendMode = Boolean(options.appendExisting && video.highlights?.length > 0);
+    const existingHighlights = appendMode ? [...video.highlights] : [];
 
     setPipelineError(null);
     setCurrentVideo(video);
-    setIsProcessing(true);
+    if (!appendMode) {
+      setIsProcessing(true);
+    }
     setIsAiScanning(true);
     setProcessingProgress(12);
     setProcessingStep('1/4: Ingesting source video metadata & stream...');
 
     try {
-      // Step 1: Fetch real metadata, subtitles, and cached MP4 for YouTube videos
-      if (video.sourceType === 'youtube' && video.youtubeUrl) {
-        setProcessingStep('1/4: Extracting YouTube video, captions & stream via yt-dlp...');
+      // Step 1: Ingest YouTube OR generic Web/Direct video URL
+      if (!appendMode && video.sourceType === 'youtube' && video.youtubeUrl) {
+        setProcessingStep('1/4: Extracting YouTube video, captions & stream...');
         const ytRes = await fetch('/api/youtube-info', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -205,17 +231,44 @@ export default function App() {
           description: ytData.description || video.description,
           transcript: video.transcript || ytData.transcript || '',
           playableSourceUrl: ytData.playableSourceUrl || video.playableSourceUrl,
+          youtubeVideoId: ytData.videoId || video.youtubeVideoId,
+          youtubeDownloadBlocked: Boolean(ytData.youtubeDownloadBlocked && !ytData.playableSourceUrl),
+        };
+        setCurrentVideo(video);
+      } else if (!appendMode && video.sourceType === 'url' && video.videoUrl && !video.playableSourceUrl) {
+        setProcessingStep('1/4: Downloading & probing external video URL...');
+        const urlRes = await fetch('/api/ingest-url', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url: video.videoUrl }),
+        });
+
+        const urlData = await urlRes.json();
+        if (!urlRes.ok || !urlData.playableSourceUrl) {
+          throw new Error(urlData.error || 'Could not ingest external video URL.');
+        }
+
+        video = {
+          ...video,
+          title: urlData.title || video.title,
+          thumbnail: urlData.thumbnail || video.thumbnail,
+          duration: urlData.duration || video.duration,
+          channelName: urlData.channelName || video.channelName,
+          description: urlData.description || video.description,
+          transcript: video.transcript || urlData.transcript || '',
+          videoUrl: urlData.playableSourceUrl,
+          playableSourceUrl: urlData.playableSourceUrl,
         };
         setCurrentVideo(video);
       } else if (!video.playableSourceUrl && video.videoUrl.startsWith('/')) {
         video.playableSourceUrl = video.videoUrl;
       }
 
-      // Step 2: If transcript is missing/short, run real Gemini 3.5 Audio Transcription
+      // Step 2: Multimodal Speech Transcription + Keyframe Visual Inspection
       setProcessingProgress(36);
-      if (!video.transcript || video.transcript.trim().length < 40) {
+      if ((!video.transcript || video.transcript.trim().length < 40) || !video.visualSummary) {
         if (video.playableSourceUrl || video.youtubeUrl) {
-          setProcessingStep('2/4: Gemini 3.5 Transcribe listening to audio & building timestamps...');
+          setProcessingStep('2/4: Gemini AI listening to audio & analyzing visual keyframes...');
           const trRes = await fetch('/api/transcribe-video', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -231,10 +284,11 @@ export default function App() {
               throw new Error(trData.error);
             }
             console.warn('Transcription step notice:', trData.error);
-          } else if (trData.transcript) {
+          } else {
             video = {
               ...video,
-              transcript: trData.transcript,
+              transcript: video.transcript || trData.transcript || '',
+              visualSummary: video.visualSummary || trData.visualSummary || '',
               duration: trData.duration || video.duration,
             };
             setCurrentVideo(video);
@@ -242,9 +296,13 @@ export default function App() {
         }
       }
 
-      // Step 3: Gemini 4 Hydrogen Viral Highlight Detection & Kinetic Captions
+      // Step 3: Gemini 4 Hydrogen Unrestricted AI Highlight & Framing Detection
       setProcessingProgress(64);
-      setProcessingStep('3/4: Gemini 4 Hydrogen detecting viral hooks, humor & pacing arcs...');
+      setProcessingStep(
+        options.customPrompt
+          ? `3/4: Gemini AI clipping "${options.customPrompt.slice(0, 42)}"...`
+          : '3/4: Gemini 4 Hydrogen detecting hooks, visuals & pacing arcs...'
+      );
 
       const response = await fetch('/api/analyze-highlights', {
         method: 'POST',
@@ -253,9 +311,17 @@ export default function App() {
           title: video.title,
           description: video.description,
           transcript: video.transcript,
+          visualSummary: video.visualSummary,
           fullDuration: video.duration,
           filter: options.focusCategory,
           targetLength: options.targetLength,
+          customPrompt: options.customPrompt || '',
+          clipCount: options.clipCount || 0,
+          minDurationSec: options.minDurationSec || 0,
+          maxDurationSec: options.maxDurationSec || 0,
+          excludeRanges: appendMode
+            ? existingHighlights.map((h) => ({ startTime: h.startTime, endTime: h.endTime }))
+            : [],
           chapters,
         }),
       });
@@ -266,7 +332,7 @@ export default function App() {
       }
 
       if (!data.clips || data.clips.length === 0) {
-        throw new Error('Gemini did not return any highlight clips for this video.');
+        throw new Error('Gemini did not return any highlight clips for this request.');
       }
 
       let finalClips: ClipHighlight[] = data.clips.map((c: any, idx: number) => ({
@@ -275,13 +341,15 @@ export default function App() {
         hook: c.hook || 'Wait till you see this!',
         reason: c.reason || 'High retention hook and emotional climax.',
         category: c.category || 'highlight',
-        startTime: Math.max(0, Math.min(Number(c.startTime) || 0, Math.max(0, video.duration - 8))),
+        startTime: Math.max(0, Math.min(Number(c.startTime) || 0, Math.max(0, video.duration - 4))),
         endTime: Math.min(Number(c.endTime) || Math.min(35, video.duration), video.duration),
         viralityScore: c.viralityScore || 92,
         hookScore: c.hookScore || 94,
         flowScore: c.flowScore || 91,
         emotionScore: c.emotionScore || 90,
         framingSuggestion: c.framingSuggestion || 'smart_crop',
+        panX: typeof c.panX === 'number' ? c.panX : 0,
+        visualContext: c.visualContext,
         emojis: c.emojis || ['🔥', '👀'],
         hashtags: c.hashtags || ['#shorts', '#viral', '#fyp'],
         recommendedMusicTempo: c.recommendedMusicTempo || 'upbeat',
@@ -301,6 +369,7 @@ export default function App() {
           videoUrl: video.videoUrl,
           playableSourceUrl: video.playableSourceUrl,
           youtubeUrl: video.youtubeUrl,
+          youtubeDownloadBlocked: Boolean(video.youtubeDownloadBlocked),
           clips: finalClips,
         }),
       });
@@ -313,6 +382,9 @@ export default function App() {
             ? { ...c, clipVideoUrl: matched.clipVideoUrl, downloadUrl: matched.downloadUrl }
             : c;
         });
+        if (autoData.youtubeEmbedFallback) {
+          video = { ...video, youtubeDownloadBlocked: true };
+        }
       } else if (!video.playableSourceUrl) {
         throw new Error(autoData.error || 'Server could not render 9:16 MP4 clips from this video URL.');
       }
@@ -321,37 +393,58 @@ export default function App() {
         video.videoUrl = finalClips[0].clipVideoUrl;
       }
 
+      const combinedClips = appendMode ? [...existingHighlights, ...finalClips] : finalClips;
+
       video = {
         ...video,
-        aiSummary: data.summary || '',
-        highlights: finalClips,
+        aiSummary: data.summary || video.aiSummary || '',
+        highlights: combinedClips,
       };
 
       setProcessingProgress(100);
       setProcessingStep('Done! Opening Clips Feed...');
 
-      setTimeout(() => {
+      const finishUpdate = () => {
         setCurrentVideo(video);
-        if (finalClips.length > 0) {
-          setActiveClip(finalClips[0]);
+        const focusClip = finalClips[0] || combinedClips[0];
+        if (focusClip && !appendMode) {
+          setActiveClip(focusClip);
           setSettings((prev) => ({
             ...prev,
-            hookBannerText: finalClips[0].hook,
-            framingMode: finalClips[0].framingSuggestion || prev.framingMode,
+            hookBannerText: focusClip.hook,
+            framingMode: focusClip.framingSuggestion || prev.framingMode,
+            panX: typeof focusClip.panX === 'number' ? focusClip.panX : 0,
           }));
-          setCurrentTime(finalClips[0].startTime);
+          setCurrentTime(focusClip.startTime);
         }
         setIsProcessing(false);
         setIsAiScanning(false);
-        setAppMode('feed');
-        showToast(`Extracted and clipped ${finalClips.length} viral 9:16 shorts with Gemini.`);
-      }, 350);
+        if (!appendMode) {
+          setAppMode('feed');
+        }
+        showToast(
+          appendMode
+            ? `Added ${finalClips.length} new AI-clipped shorts!`
+            : `Extracted and clipped ${finalClips.length} 9:16 shorts with Gemini AI.`
+        );
+      };
+
+      if (appendMode) {
+        finishUpdate();
+      } else {
+        setTimeout(finishUpdate, 300);
+      }
     } catch (err: any) {
       console.error('Pipeline error:', err);
-      setPipelineError(err.message || 'Video clipping failed. Please check the URL or try again.');
+      const errMsg = err.message || 'Video clipping failed. Please check the URL or try again.';
       setIsProcessing(false);
       setIsAiScanning(false);
-      setAppMode('generator');
+      if (appendMode) {
+        showToast(errMsg);
+      } else {
+        setPipelineError(errMsg);
+        setAppMode('generator');
+      }
     }
   };
 
@@ -366,6 +459,88 @@ export default function App() {
     });
   };
 
+  const handleApplyDirectorActions = (actions: DirectorActions): string[] => {
+    const summary: string[] = [];
+    const nextSettings: Partial<ExportSettings> = {};
+
+    if (typeof actions.hookBannerText === 'string' && actions.hookBannerText.trim()) {
+      nextSettings.hookBannerText = actions.hookBannerText.trim();
+      nextSettings.showHookBanner = true;
+      summary.push(`Hook -> "${actions.hookBannerText.trim()}"`);
+    }
+    if (typeof actions.showHookBanner === 'boolean') {
+      nextSettings.showHookBanner = actions.showHookBanner;
+    }
+    if (actions.framingMode) {
+      nextSettings.framingMode = actions.framingMode;
+      summary.push(`Framing -> ${actions.framingMode}`);
+    }
+    if (typeof actions.panX === 'number') {
+      nextSettings.panX = Math.max(-100, Math.min(100, Math.round(actions.panX)));
+      summary.push(`Pan -> ${nextSettings.panX}%`);
+    }
+    if (actions.captionPreset) {
+      nextSettings.captionPreset = actions.captionPreset;
+      summary.push(`Caption Preset -> ${actions.captionPreset}`);
+    }
+    if (actions.captionColor) {
+      nextSettings.captionColor = actions.captionColor;
+    }
+    if (actions.captionEntranceAnim) {
+      nextSettings.captionEntranceAnim = actions.captionEntranceAnim;
+    }
+    if (actions.captionExitAnim) {
+      nextSettings.captionExitAnim = actions.captionExitAnim;
+    }
+    if (actions.videoFilter) {
+      nextSettings.videoFilter = actions.videoFilter;
+      summary.push(`Color Grade -> ${actions.videoFilter}`);
+    }
+    if (typeof actions.filterBrightness === 'number') {
+      nextSettings.filterBrightness = Math.max(50, Math.min(150, Math.round(actions.filterBrightness)));
+    }
+    if (typeof actions.filterContrast === 'number') {
+      nextSettings.filterContrast = Math.max(50, Math.min(200, Math.round(actions.filterContrast)));
+    }
+    if (typeof actions.filterSaturate === 'number') {
+      nextSettings.filterSaturate = Math.max(0, Math.min(200, Math.round(actions.filterSaturate)));
+    }
+
+    if (Object.keys(nextSettings).length > 0) {
+      handleUpdateSettings(nextSettings);
+    }
+
+    if (activeClip && (typeof actions.startTime === 'number' || typeof actions.endTime === 'number' || actions.newClipTitle || actions.hookBannerText)) {
+      const nextStart = typeof actions.startTime === 'number' ? Math.max(0, Math.min(actions.startTime, currentVideo.duration - 4)) : activeClip.startTime;
+      const nextEnd = typeof actions.endTime === 'number' ? Math.min(currentVideo.duration, Math.max(nextStart + 4, actions.endTime)) : activeClip.endTime;
+      const updatedClip: ClipHighlight = {
+        ...activeClip,
+        startTime: nextStart,
+        endTime: nextEnd,
+        title: actions.newClipTitle ? actions.newClipTitle.trim() : activeClip.title,
+        hook: actions.hookBannerText ? actions.hookBannerText.trim() : activeClip.hook,
+      };
+      handleClipUpdated(updatedClip);
+      if (typeof actions.startTime === 'number' || typeof actions.endTime === 'number') {
+        summary.push(`Trim -> ${Math.round(nextStart)}s–${Math.round(nextEnd)}s`);
+      }
+    }
+
+    if (actions.triggerClipMorePrompt && actions.triggerClipMorePrompt.trim()) {
+      summary.push(`Extracting new clips...`);
+      handleGenerateClips({
+        videoSource: currentVideo,
+        focusCategory: 'all',
+        targetLength: 'auto',
+        customPrompt: actions.triggerClipMorePrompt.trim(),
+        clipCount: 3,
+        appendExisting: true,
+      });
+    }
+
+    return summary;
+  };
+
   const relTimeInClip = Math.max(0, currentTime - activeClip.startTime);
 
   return (
@@ -378,6 +553,7 @@ export default function App() {
         onSetAppMode={setAppMode}
         onOpenImportModal={() => setIsImportModalOpen(true)}
         onOpenExportModal={() => setIsExportModalOpen(true)}
+        onOpenAiDirector={() => setIsDirectorOpen(true)}
       />
 
       {/* Main Workspace Body */}
@@ -402,6 +578,8 @@ export default function App() {
             <OpusClipFeed
               videoSource={currentVideo}
               highlights={currentVideo.highlights}
+              settings={settings}
+              onUpdateSettings={handleUpdateSettings}
               onSelectClipToEdit={handleSelectClipToEdit}
               onOpenExportModal={(clip) => {
                 handleSelectClip(clip);
@@ -409,6 +587,17 @@ export default function App() {
               }}
               onNewVideo={() => setAppMode('generator')}
               onClipUpdated={handleClipUpdated}
+              isAiGenerating={isAiScanning}
+              onGenerateMoreClips={(customPrompt, clipCount) =>
+                handleGenerateClips({
+                  videoSource: currentVideo,
+                  focusCategory: 'all',
+                  targetLength: 'auto',
+                  customPrompt,
+                  clipCount,
+                  appendExisting: true,
+                })
+              }
             />
           </div>
         )}
@@ -454,11 +643,14 @@ export default function App() {
                   highlights={currentVideo.highlights}
                   activeClip={activeClip}
                   onSelectClip={handleSelectClip}
-                  onTriggerAiScan={() =>
+                  onTriggerAiScan={(filter, customPrompt) =>
                     handleGenerateClips({
                       videoSource: currentVideo,
-                      focusCategory: 'all',
+                      focusCategory: filter || 'all',
                       targetLength: 'auto',
+                      customPrompt,
+                      clipCount: 3,
+                      appendExisting: true,
                     })
                   }
                   isAiScanning={isAiScanning}
@@ -472,6 +664,8 @@ export default function App() {
                     videoUrl={currentVideo.videoUrl}
                     playableSourceUrl={currentVideo.playableSourceUrl}
                     youtubeUrl={currentVideo.youtubeUrl}
+                    youtubeVideoId={currentVideo.youtubeVideoId}
+                    youtubeDownloadBlocked={currentVideo.youtubeDownloadBlocked}
                     thumbnail={currentVideo.thumbnail}
                     activeClip={activeClip}
                     settings={settings}
@@ -492,24 +686,36 @@ export default function App() {
                 </div>
               </section>
 
-              {/* Right Column: Style & Script Tabs */}
+              {/* Right Column: Style, Video Effects & Script Tabs */}
               <section className="lg:col-span-4 h-[550px] lg:h-[calc(100vh-170px)] flex flex-col space-y-3 min-h-0">
-                <div className="flex p-0.5 bg-zinc-900 border border-zinc-800 rounded-lg shrink-0">
+                <div className="flex p-0.5 bg-zinc-900 border border-zinc-800 rounded-lg shrink-0 gap-0.5">
                   <button
                     onClick={() => setRightPanelTab('style')}
-                    className={`flex-1 py-1.5 px-3 text-xs font-medium rounded-md flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                    className={`flex-1 py-1.5 px-2 text-xs font-medium rounded-md flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
                       rightPanelTab === 'style'
                         ? 'bg-zinc-800 text-white font-semibold shadow-sm'
                         : 'text-zinc-400 hover:text-zinc-200'
                     }`}
                   >
                     <Sliders className="w-3.5 h-3.5" />
-                    <span>Caption Styles</span>
+                    <span>Captions</span>
+                  </button>
+
+                  <button
+                    onClick={() => setRightPanelTab('effects')}
+                    className={`flex-1 py-1.5 px-2 text-xs font-medium rounded-md flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                      rightPanelTab === 'effects'
+                        ? 'bg-zinc-800 text-white font-semibold shadow-sm'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    <Palette className="w-3.5 h-3.5" />
+                    <span>Video Effects</span>
                   </button>
 
                   <button
                     onClick={() => setRightPanelTab('transcript')}
-                    className={`flex-1 py-1.5 px-3 text-xs font-medium rounded-md flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                    className={`flex-1 py-1.5 px-2 text-xs font-medium rounded-md flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
                       rightPanelTab === 'transcript'
                         ? 'bg-zinc-800 text-white font-semibold shadow-sm'
                         : 'text-zinc-400 hover:text-zinc-200'
@@ -527,6 +733,16 @@ export default function App() {
                       activeClip={activeClip}
                       onUpdateSettings={handleUpdateSettings}
                     />
+                  ) : rightPanelTab === 'effects' ? (
+                    <VideoEffectsPanel
+                      settings={settings}
+                      onUpdateSettings={handleUpdateSettings}
+                      videoUrl={currentVideo.videoUrl}
+                      playableSourceUrl={currentVideo.playableSourceUrl}
+                      videoTitle={currentVideo.title}
+                      clipHook={activeClip.hook}
+                      currentTimestamp={currentTime}
+                    />
                   ) : (
                     <TranscriptEditor
                       activeClip={activeClip}
@@ -541,6 +757,16 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* AI Studio Director Slide-Over */}
+      <AiDirectorDrawer
+        isOpen={isDirectorOpen}
+        onClose={() => setIsDirectorOpen(false)}
+        currentVideo={currentVideo}
+        activeClip={activeClip}
+        settings={settings}
+        onApplyActions={handleApplyDirectorActions}
+      />
 
       {/* Video Import Modal */}
       <VideoImportModal

@@ -39,6 +39,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [exportedBlob, setExportedBlob] = useState<Blob | null>(null);
   const [copiedCaption, setCopiedCaption] = useState(false);
+  const [burnServerCaptions, setBurnServerCaptions] = useState(true);
 
   if (!isOpen) return null;
 
@@ -48,7 +49,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const handleFastClipExport = async () => {
     setIsExporting(true);
     setExportProgress(25);
-    setExportStatusText('Clipping 9:16 vertical video with FFmpeg...');
+    setExportStatusText(
+      burnServerCaptions
+        ? 'Clipping 9:16 video & burning AI subtitles with FFmpeg...'
+        : 'Clipping 9:16 vertical video with FFmpeg...'
+    );
     setDownloadUrl(null);
 
     try {
@@ -66,6 +71,16 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           panX: settings.panX,
           title: activeClip.title,
           clipId: `${activeClip.id}_exp`,
+          burnCaptions: burnServerCaptions,
+          captions: activeClip.captions,
+          captionColor: settings.captionColor,
+          captionBaseColor: settings.captionBaseColor,
+          captionPosition: settings.captionPosition,
+          captionFontSize: settings.captionFontSize,
+          captionFontFamily: settings.captionFontFamily,
+          captionTextCase: settings.captionTextCase,
+          captionOutlineWidth: settings.captionOutlineWidth,
+          captionDropShadow: settings.captionDropShadow,
         }),
       });
 
@@ -131,9 +146,16 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         framingMode: settings.framingMode,
         panX: settings.panX,
         captionPreset: settings.captionPreset,
+        captionHighlightStyle: settings.captionHighlightStyle,
         captionPosition: settings.captionPosition,
         captionFontSize: settings.captionFontSize,
         captionColor: settings.captionColor,
+        captionBaseColor: settings.captionBaseColor,
+        captionFontFamily: settings.captionFontFamily,
+        captionTextCase: settings.captionTextCase,
+        captionOutlineWidth: settings.captionOutlineWidth,
+        captionWordsPerLine: settings.captionWordsPerLine,
+        captionDropShadow: settings.captionDropShadow,
         captionEntranceAnim: settings.captionEntranceAnim,
         captionExitAnim: settings.captionExitAnim,
         captions: activeClip.captions,
@@ -268,7 +290,23 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           </div>
 
           {/* Export Action / Progress */}
-          {isExporting ? (
+          {videoSource.youtubeDownloadBlocked &&
+          !videoSource.playableSourceUrl &&
+          !activeClip.clipVideoUrl ? (
+            <div className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 space-y-3 text-xs">
+              <p className="text-zinc-300 leading-relaxed">
+                YouTube blocks direct MP4 downloads from cloud server IPs. Your 9:16 clip plays live in ClipForge, and you can export the timed{' '}
+                <span className="text-violet-400 font-semibold">.SRT subtitles</span> and viral post copy below — or upload the local MP4 file to export a burned 9:16 MP4.
+              </p>
+              <button
+                onClick={handleDownloadSrt}
+                className="w-full py-2.5 px-3 bg-violet-600 hover:bg-violet-500 text-white font-semibold rounded-lg text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+              >
+                <FileText className="w-4 h-4" />
+                <span>Download .SRT Captions ({activeClip.captions.length} lines)</span>
+              </button>
+            </div>
+          ) : isExporting ? (
             <div className="p-5 rounded-xl bg-zinc-950 border border-zinc-800 space-y-3">
               <div className="flex items-center justify-between text-xs">
                 <span className="text-zinc-300 flex items-center gap-2">
@@ -310,7 +348,19 @@ export const ExportModal: React.FC<ExportModalProps> = ({
               </div>
             </div>
           ) : (
-            <div className="space-y-2">
+            <div className="space-y-3">
+              <label className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-zinc-950 border border-zinc-800 cursor-pointer hover:border-zinc-700 transition-colors">
+                <span className="text-xs text-zinc-200 font-medium">
+                  Burn Styled Subtitles into Server MP4
+                </span>
+                <input
+                  type="checkbox"
+                  checked={burnServerCaptions}
+                  onChange={(e) => setBurnServerCaptions(e.target.checked)}
+                  className="accent-violet-500 w-4 h-4 cursor-pointer"
+                />
+              </label>
+
               <button
                 onClick={handleFastClipExport}
                 className="w-full py-2.5 bg-violet-600 hover:bg-violet-500 text-white font-semibold rounded-lg text-xs flex items-center justify-center gap-2 shadow-sm cursor-pointer transition-colors"

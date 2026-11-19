@@ -1,4 +1,8 @@
 import { VideoSource } from '../types';
+import thumbPodcast from '../assets/images/thumb_podcast_ai_1795100814455.jpg';
+import thumbChallenge from '../assets/images/thumb_laser_challenge_1795100814269.jpg';
+import thumbNeuro from '../assets/images/thumb_neuro_lab_1795100814397.jpg';
+import thumbComedy from '../assets/images/thumb_comedy_stage_1795100814595.jpg';
 
 export const SAMPLE_VIDEOS: VideoSource[] = [
   {
@@ -7,7 +11,7 @@ export const SAMPLE_VIDEOS: VideoSource[] = [
     creator: 'PowerfulJRE',
     channelName: 'Joe Rogan Experience #2054',
     duration: 120,
-    thumbnail: 'https://images.unsplash.com/photo-1535378917042-10a22c95931a?auto=format&fit=crop&w=1200&q=80',
+    thumbnail: thumbPodcast,
     videoUrl: '/samples/podcast.mp4',
     sourceType: 'sample',
     youtubeUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
@@ -228,7 +232,7 @@ export const SAMPLE_VIDEOS: VideoSource[] = [
     creator: 'MrBeast',
     channelName: 'MrBeast Official',
     duration: 120,
-    thumbnail: 'https://images.unsplash.com/photo-1511512578047-dfb367046420?auto=format&fit=crop&w=1200&q=80',
+    thumbnail: thumbChallenge,
     videoUrl: '/samples/challenge.mp4',
     sourceType: 'sample',
     youtubeUrl: 'https://www.youtube.com/watch?v=0e3GPea1Tyg',
@@ -367,7 +371,7 @@ export const SAMPLE_VIDEOS: VideoSource[] = [
     creator: 'Huberman Lab',
     channelName: 'Neuroscience & High Performance',
     duration: 120,
-    thumbnail: 'https://images.unsplash.com/photo-1507679799987-c73779587ccf?auto=format&fit=crop&w=1200&q=80',
+    thumbnail: thumbNeuro,
     videoUrl: '/samples/nature.mp4',
     sourceType: 'sample',
     youtubeUrl: 'https://www.youtube.com/watch?v=gXDMoiEkyuQ',
@@ -491,7 +495,7 @@ export const SAMPLE_VIDEOS: VideoSource[] = [
     creator: 'Comedy Central Vault',
     channelName: 'Live Crowd Work Specials',
     duration: 120,
-    thumbnail: 'https://images.unsplash.com/photo-1514306191717-452ec28c7814?auto=format&fit=crop&w=1200&q=80',
+    thumbnail: thumbComedy,
     videoUrl: '/samples/comedy.mp4',
     sourceType: 'sample',
     youtubeUrl: 'https://www.youtube.com/watch?v=live-comedy-special',

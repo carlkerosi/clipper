@@ -1,13 +1,26 @@
 export type ClipCategory = 'funny' | 'highlight' | 'educational' | 'debate' | 'all';
 
-export type CaptionPreset = 
-  | 'hormozi'       // Bold yellow/white uppercase, black outline, bouncing active word
-  | 'tiktok_neon'   // Clean modern font with cyan/lime glowing capsule
-  | 'beast_flame'   // Orange/red fiery pop with intense emphasis
-  | 'karaoke_fill'  // Word filling with gradient as spoken
+export type CaptionPreset =
+  | 'opus_box'       // OpusClip signature dark green/vibrant active word highlight box
+  | 'opus_classic'   // OpusClip crisp white bold text with #22C55E green active word pop
+  | 'hormozi'        // Bold yellow/white uppercase, heavy black outline, bouncing active word
+  | 'tiktok_neon'    // Clean modern font with cyan/lime glowing capsule
+  | 'beast_flame'    // Orange/red fiery pop with intense emphasis
+  | 'karaoke_fill'   // Word filling with accent color as spoken
   | 'minimal_cinema'; // Crisp film subtitle with frosted dark pill
 
-export type FramingMode = 
+export type CaptionHighlightStyle =
+  | 'active_box'     // Colored rounded pill behind currently spoken word
+  | 'text_color'     // Pop scale + color fill on currently spoken word
+  | 'underline_glow' // Illuminated accent bar beneath active word
+  | 'dual_tone'      // Progressive word-by-word spoken fill
+  | 'none';          // Uniform styling without active word highlight
+
+export type CaptionTextCase = 'uppercase' | 'titlecase' | 'original';
+
+export type CaptionFontFamily = 'Montserrat' | 'Plus Jakarta Sans' | 'Rubik Mono One';
+
+export type FramingMode =
   | 'smart_crop'    // 9:16 crop focused on speaker with pan control
   | 'split_screen'  // Main video on top, satisfying video/gameplay bottom
   | 'blur_fit'      // 16:9 in center with blurred video fill
@@ -44,6 +57,8 @@ export interface ClipHighlight {
   hashtags: string[];
   recommendedMusicTempo?: string;
   captions: CaptionChunk[];
+  panX?: number;
+  visualContext?: string;
   clipVideoUrl?: string; // Direct path to pre-clipped 9:16 vertical MP4
   downloadUrl?: string;
 }
@@ -56,13 +71,27 @@ export interface VideoSource {
   duration: number; // in seconds
   thumbnail: string;
   videoUrl: string;
-  playableSourceUrl?: string; // Server-hosted playable MP4/WebM path (for uploads, samples, cached YouTube)
-  sourceType: 'youtube' | 'upload' | 'sample';
+  playableSourceUrl?: string; // Server-hosted playable MP4/WebM path (for uploads, samples, cached URLs)
+  sourceType: 'youtube' | 'upload' | 'sample' | 'url';
   youtubeUrl?: string;
+  youtubeVideoId?: string;
+  youtubeDownloadBlocked?: boolean;
   description: string;
   transcript: string;
+  visualSummary?: string;
   aiSummary?: string;
   highlights: ClipHighlight[];
+}
+
+export interface ClipGenerationOptions {
+  videoSource: VideoSource;
+  focusCategory: string;
+  targetLength: string;
+  customPrompt?: string;
+  clipCount?: number;
+  minDurationSec?: number;
+  maxDurationSec?: number;
+  appendExisting?: boolean;
 }
 
 export type CaptionEntranceAnimation =
@@ -82,12 +111,30 @@ export type CaptionExitAnimation =
   | 'pop_out'     // Snappy outward blast
   | 'none';       // Instant cut
 
+export type VideoFilterPreset =
+  | 'none'
+  | 'grayscale'
+  | 'sepia'
+  | 'high_contrast'
+  | 'vivid'
+  | 'noir'
+  | 'warm'
+  | 'cool'
+  | 'vintage';
+
 export interface ExportSettings {
   resolution: '1080p' | '720p';
   framerate: 30 | 60;
   framingMode: FramingMode;
   captionPreset: CaptionPreset;
+  captionHighlightStyle?: CaptionHighlightStyle;
   captionColor: string;
+  captionBaseColor?: string;
+  captionFontFamily?: CaptionFontFamily;
+  captionTextCase?: CaptionTextCase;
+  captionOutlineWidth?: number;
+  captionWordsPerLine?: 'single_line' | 'multi_line';
+  captionDropShadow?: boolean;
   captionPosition: 'top' | 'middle' | 'lower_third' | 'bottom';
   captionFontSize: number;
   captionEntranceAnim?: CaptionEntranceAnimation;
@@ -98,5 +145,8 @@ export interface ExportSettings {
   progressBarColor: string;
   panX: number; // -100 to 100 for framing speaker
   splitBottomType?: 'minecraft' | 'subway' | 'satisfying' | 'gameplay';
+  videoFilter?: VideoFilterPreset;
+  filterBrightness?: number;
+  filterContrast?: number;
+  filterSaturate?: number;
 }
-

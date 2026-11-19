@@ -14,9 +14,30 @@ const execFileAsync = promisify(execFile);
 // Ensure local bin directory is in PATH for yt-dlp and ffmpeg
 const binDir = path.resolve(process.cwd(), "bin");
 process.env.PATH = `${binDir}:${process.env.PATH}`;
-const ytdlpBin = fs.existsSync(path.join(binDir, "yt-dlp"))
-  ? path.join(binDir, "yt-dlp")
-  : "yt-dlp";
+const localYtdlpPath = path.join(binDir, "yt-dlp");
+const ytdlpBin = fs.existsSync(localYtdlpPath) ? localYtdlpPath : "yt-dlp";
+
+function ensureYtdlpReady(): string {
+  if (fs.existsSync(localYtdlpPath)) {
+    try {
+      fs.chmodSync(localYtdlpPath, 0o755);
+    } catch {}
+    return localYtdlpPath;
+  }
+  return ytdlpBin;
+}
+
+function isYoutubeBotWallError(err: any): boolean {
+  const msg = String(err?.stderr || err?.message || err || "").toLowerCase();
+  return (
+    msg.includes("sign in to confirm") ||
+    msg.includes("not a bot") ||
+    msg.includes("login_required") ||
+    msg.includes("use --cookies")
+  );
+}
+
+ensureYtdlpReady();
 
 const publicDir = path.resolve(process.cwd(), "public");
 const clipsDir = path.join(publicDir, "clips");
@@ -30,8 +51,15 @@ if (!fs.existsSync(uploadsDir)) {
 }
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 const isProduction = process.env.NODE_ENV === "production";
+const portArgIdx = process.argv.indexOf("--port");
+const cliPort = portArgIdx !== -1 ? Number(process.argv[portArgIdx + 1]) : NaN;
+const PORT =
+  Number.isFinite(cliPort) && cliPort > 0
+    ? cliPort
+    : isProduction
+    ? Number(process.env.PORT) || 3000
+    : 3000;
 
 app.use(express.json({ limit: "50mb" }));
 
@@ -302,7 +330,7 @@ async function ensureYoutubeCached(
     const tmpOut = path.join(uploadsDir, `yt_${safeId}.part.mp4`);
     try {
       await execFileAsync(
-        ytdlpBin,
+        ensureYtdlpReady(),
         [
           "--js-runtimes",
           "node",
@@ -316,7 +344,7 @@ async function ensureYoutubeCached(
           tmpOut,
           youtubeUrl,
         ],
-        { timeout: 60000, maxBuffer: 10 * 1024 * 1024 }
+        { timeout: 45000, maxBuffer: 10 * 1024 * 1024 }
       );
       if (fs.existsSync(tmpOut) && fs.statSync(tmpOut).size > 50000) {
         fs.renameSync(tmpOut, outPath);
@@ -380,10 +408,11 @@ app.post("/api/youtube-info", async (req, res) => {
 
     let info: any = null;
     let transcript = "";
+    let ytdlpBotBlocked = false;
 
     try {
       const { stdout } = await execFileAsync(
-        ytdlpBin,
+        ensureYtdlpReady(),
         [
           "--js-runtimes",
           "node",
@@ -415,6 +444,9 @@ app.post("/api/youtube-info", async (req, res) => {
       }
     } catch (ytErr: any) {
       console.warn("yt-dlp metadata fetch warning:", ytErr?.message);
+      if (isYoutubeBotWallError(ytErr)) {
+        ytdlpBotBlocked = true;
+      }
     }
 
     // Look for any written .vtt subtitle file in /tmp matching prefix
@@ -436,29 +468,141 @@ app.post("/api/youtube-info", async (req, res) => {
     }
 
     const resolvedId = info?.id || videoId || metaId;
-    const duration = Math.max(10, Math.round(Number(info?.duration) || 180));
+    let resolvedTitle = info?.title || "";
+    let resolvedDesc = (info?.description || "").slice(0, 1500);
+    let resolvedChannel = info?.uploader || info?.channel || "";
+    let resolvedThumb =
+      info?.thumbnail ||
+      (videoId
+        ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`
+        : "");
+    let duration = Math.round(Number(info?.duration) || 0);
+    let chapters: any[] = Array.isArray(info?.chapters) ? info.chapters.slice(0, 20) : [];
 
-    // Cache full MP4 when duration <= 20 minutes so both Gemini transcription and FFmpeg clipping are instant
+    // Fallback metadata & captions via YouTube oEmbed + watch HTML when yt-dlp hits bot check on cloud IPs
+    if (!info || !duration || !transcript) {
+      try {
+        const oembedRes = await fetch(
+          `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`,
+          { signal: AbortSignal.timeout(6000) }
+        );
+        if (oembedRes.ok) {
+          const oe: any = await oembedRes.json();
+          if (!resolvedTitle && oe.title) resolvedTitle = oe.title;
+          if (!resolvedChannel && oe.author_name) resolvedChannel = oe.author_name;
+          if (!info?.thumbnail && oe.thumbnail_url) resolvedThumb = oe.thumbnail_url;
+        }
+      } catch {}
+
+      try {
+        const watchRes = await fetch(url, {
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+          },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (watchRes.ok) {
+          const html = await watchRes.text();
+          if (!duration) {
+            const durMatch = html.match(/"lengthSeconds":"(\d+)"/);
+            if (durMatch?.[1]) duration = Number(durMatch[1]);
+          }
+          if (!resolvedDesc) {
+            const descMatch = html.match(/"shortDescription":"((?:[^"\\]|\\.)*)"/);
+            if (descMatch?.[1]) {
+              try {
+                resolvedDesc = JSON.parse(`"${descMatch[1]}"`).slice(0, 1500);
+              } catch {}
+            }
+          }
+          if (!transcript) {
+            const capMatch = html.match(/"captionTracks":(\[[^\]]+\])/);
+            if (capMatch?.[1]) {
+              try {
+                const tracks = JSON.parse(capMatch[1]);
+                const enTrack =
+                  tracks.find((t: any) => String(t.languageCode || "").startsWith("en")) ||
+                  tracks[0];
+                if (enTrack?.baseUrl) {
+                  const vttRes = await fetch(`${enTrack.baseUrl}&fmt=vtt`, {
+                    signal: AbortSignal.timeout(6000),
+                  });
+                  if (vttRes.ok) {
+                    const vttRaw = await vttRes.text();
+                    transcript = parseVttToTranscript(vttRaw);
+                  }
+                }
+              } catch {}
+            }
+          }
+        }
+      } catch {}
+    }
+
+    // Grounded Gemini URL + Search enrichment when YouTube blocks raw HTML/transcript scraping on datacenter IPs
+    if ((!duration || !transcript) && process.env.GEMINI_API_KEY) {
+      try {
+        const ai = getGeminiClient();
+        const searchPrompt = `Look up this real YouTube video: ${url}
+Known title: "${resolvedTitle || "Unknown"}"
+Known creator: "${resolvedChannel || "Unknown"}"
+Return ONLY a raw JSON object (no markdown fences) with these keys:
+{
+  "durationSeconds": <integer exact or accurate estimated duration in seconds, e.g. 19 or 620>,
+  "summary": "<concise description of what happens / is discussed in this video>",
+  "highlightsContext": "<timestamped outline e.g. [00:00] intro ... [00:45] key point ...>"
+}`;
+        const gRes = await withGeminiRetry(() =>
+          ai.models.generateContent({
+            model: "gemini-4-hydrogen",
+            contents: searchPrompt,
+            config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              tools: [{ googleSearch: {} }, { urlContext: {} }],
+            },
+          })
+        );
+        const rawText = (gRes.text || "").trim();
+        const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+        if (jsonMatch?.[0]) {
+          const gData = JSON.parse(jsonMatch[0]);
+          if (!duration && Number(gData.durationSeconds) >= 8) {
+            duration = Math.round(Number(gData.durationSeconds));
+          }
+          if (!resolvedDesc && gData.summary) {
+            resolvedDesc = String(gData.summary).slice(0, 1500);
+          }
+          if (!transcript && gData.highlightsContext) {
+            transcript = String(gData.highlightsContext).slice(0, 6000);
+          }
+        }
+      } catch (groundErr: any) {
+        console.warn("Gemini grounded YouTube metadata notice:", groundErr?.message);
+      }
+    }
+
+    duration = Math.max(10, duration || 180);
+
+    // Cache full MP4 when not bot-blocked and duration <= 20 minutes
     let playableSourceUrl: string | null = null;
-    if (videoId && duration <= 1200) {
+    if (videoId && !ytdlpBotBlocked && duration <= 1200) {
       playableSourceUrl = await ensureYoutubeCached(url, resolvedId);
     }
 
     return res.json({
       id: resolvedId,
-      title: info?.title || (videoId ? `YouTube Video (${videoId})` : "YouTube Video"),
-      description: (info?.description || "").slice(0, 1500),
+      title: resolvedTitle || (videoId ? `YouTube Video (${videoId})` : "YouTube Video"),
+      description: resolvedDesc,
       duration,
-      thumbnail:
-        info?.thumbnail ||
-        (videoId
-          ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`
-          : "https://images.unsplash.com/photo-1611162617474-5b21e879e113?auto=format&fit=crop&w=1200&q=80"),
-      channelName: info?.uploader || info?.channel || "YouTube Creator",
+      thumbnail: resolvedThumb,
+      channelName: resolvedChannel || "YouTube Creator",
       videoId: resolvedId,
       transcript,
       playableSourceUrl,
-      chapters: Array.isArray(info?.chapters) ? info.chapters.slice(0, 20) : [],
+      youtubeDownloadBlocked: !playableSourceUrl,
+      chapters,
     });
   } catch (error: any) {
     console.error("Error in /api/youtube-info:", error);
@@ -467,10 +611,170 @@ app.post("/api/youtube-info", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
-// 3. Gemini 3.5 Transcribe — Real Audio Speech-to-Text with Timestamps
+// 2B. Universal Direct / Multi-Platform Video URL Ingestion (Unrestricted)
+// ---------------------------------------------------------------------------
+app.post("/api/ingest-url", async (req, res) => {
+  try {
+    const { url } = req.body;
+    if (!url || typeof url !== "string") {
+      return res.status(400).json({ error: "Video URL is required" });
+    }
+
+    const cleanUrl = url.trim();
+    const outName = `url_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.mp4`;
+    const outPath = path.join(uploadsDir, outName);
+
+    // 1. Check if URL points directly to a video file (.mp4, .mov, .webm, .m4v, or video/* content-type)
+    const looksDirectMedia = /\.(mp4|mov|webm|m4v)(\?.*)?$/i.test(cleanUrl);
+    if (looksDirectMedia) {
+      const dlRes = await fetch(cleanUrl, { signal: AbortSignal.timeout(90000) });
+      if (!dlRes.ok) {
+        return res.status(400).json({ error: `Could not download video URL (HTTP ${dlRes.status}).` });
+      }
+      const arrayBuf = await dlRes.arrayBuffer();
+      const buf = Buffer.from(arrayBuf);
+      if (buf.length < 5000) {
+        return res.status(400).json({ error: "Downloaded URL did not contain valid video data." });
+      }
+      fs.writeFileSync(outPath, buf);
+      const meta = await probeVideoFile(outPath);
+      const urlTitle = path.basename(cleanUrl.split("?")[0]).replace(/\.[^/.]+$/, "").replace(/[_-]+/g, " ") || "Direct Video URL";
+      return res.json({
+        success: true,
+        id: `url-${Date.now()}`,
+        title: urlTitle,
+        channelName: new URL(cleanUrl).hostname,
+        playableSourceUrl: `/uploads/${outName}`,
+        duration: meta.duration,
+        width: meta.width,
+        height: meta.height,
+        hasAudio: meta.hasAudio,
+        transcript: "",
+      });
+    }
+
+    // 2. Otherwise use yt-dlp to extract & download from Vimeo, TikTok, Instagram, X, Twitch, Reddit, etc.
+    let info: any = null;
+    try {
+      const { stdout } = await execFileAsync(
+        ensureYtdlpReady(),
+        [
+          "--no-check-certificates",
+          "--no-playlist",
+          "--dump-json",
+          "--skip-download",
+          cleanUrl,
+        ],
+        { timeout: 25000, maxBuffer: 15 * 1024 * 1024 }
+      );
+      const lastLine = stdout.trim().split("\n").reverse().find((l) => l.trim().startsWith("{"));
+      if (lastLine) info = JSON.parse(lastLine);
+    } catch (infoErr: any) {
+      console.warn("Generic URL dump-json notice:", infoErr?.message);
+    }
+
+    await execFileAsync(
+      ensureYtdlpReady(),
+      [
+        "--no-check-certificates",
+        "--no-playlist",
+        "-f",
+        "best[height<=1080][ext=mp4]/best[ext=mp4]/best",
+        "--max-filesize",
+        "500M",
+        "-o",
+        outPath,
+        cleanUrl,
+      ],
+      { timeout: 90000, maxBuffer: 10 * 1024 * 1024 }
+    );
+
+    if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 5000) {
+      return res.status(400).json({ error: "Could not download playable video from that URL." });
+    }
+
+    const meta = await probeVideoFile(outPath);
+    return res.json({
+      success: true,
+      id: `url-${Date.now()}`,
+      title: info?.title || "Imported Web Video",
+      description: (info?.description || "").slice(0, 1500),
+      thumbnail: info?.thumbnail || "",
+      channelName: info?.uploader || info?.channel || new URL(cleanUrl).hostname,
+      playableSourceUrl: `/uploads/${outName}`,
+      duration: meta.duration || Math.round(Number(info?.duration) || 60),
+      width: meta.width,
+      height: meta.height,
+      hasAudio: meta.hasAudio,
+      transcript: "",
+    });
+  } catch (err: any) {
+    console.error("Error in /api/ingest-url:", err);
+    return res.status(500).json({ error: err.message || "Failed to ingest video URL" });
+  }
+});
+
+// Extract sampled JPEG frames + analyze visual scene sequence with Gemini Vision
+async function analyzeVideoKeyframes(localFile: string, duration: number): Promise<string> {
+  const framePaths: string[] = [];
+  try {
+    const safeDur = Math.max(4, duration);
+    const frameCount = safeDur < 20 ? 3 : 6;
+    const parts: any[] = [];
+
+    for (let i = 0; i < frameCount; i++) {
+      const ts = Math.max(0.5, Math.min(safeDur - 0.5, ((i + 0.5) / frameCount) * safeDur));
+      const fPath = `/tmp/kf_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}.jpg`;
+      framePaths.push(fPath);
+      try {
+        await execFileAsync(
+          "ffmpeg",
+          ["-y", "-ss", ts.toFixed(1), "-i", localFile, "-vframes", "1", "-q:v", "6", "-vf", "scale=480:-2", fPath],
+          { timeout: 10000 }
+        );
+        if (fs.existsSync(fPath) && fs.statSync(fPath).size > 500) {
+          const mm = String(Math.floor(ts / 60)).padStart(2, "0");
+          const ss = String(Math.floor(ts % 60)).padStart(2, "0");
+          parts.push({ text: `Keyframe at [${mm}:${ss}]:` });
+          parts.push({
+            inlineData: {
+              mimeType: "image/jpeg",
+              data: fs.readFileSync(fPath).toString("base64"),
+            },
+          });
+        }
+      } catch {}
+    }
+
+    if (parts.length < 2) return "";
+    parts.push({
+      text: "Describe each timestamped visual scene briefly, noting speakers, horizontal position (left/center/right), screen content, action peaks, or emotional expressions so an editor can clip and reframe this video accurately.",
+    });
+
+    const ai = getGeminiClient();
+    const res = await withGeminiRetry(() =>
+      ai.models.generateContent({
+        model: "gemini-4-hydrogen",
+        contents: { parts },
+        config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
+      })
+    );
+    return (res.text || "").trim().slice(0, 4000);
+  } catch (err: any) {
+    console.warn("Visual keyframe analysis notice:", err?.message);
+    return "";
+  } finally {
+    for (const p of framePaths) {
+      if (fs.existsSync(p)) fs.unlink(p, () => {});
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3. Gemini 3.5 Transcribe + Multimodal Vision — Full-Duration Audio & Visuals
 // ---------------------------------------------------------------------------
 app.post("/api/transcribe-video", async (req, res) => {
-  const tempMp3 = `/tmp/audio_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.mp3`;
+  const tempFiles: string[] = [];
   try {
     const { videoUrl, playableSourceUrl, youtubeUrl } = req.body;
 
@@ -486,54 +790,78 @@ app.post("/api/transcribe-video", async (req, res) => {
     }
 
     if (!localFile) {
+      if (youtubeUrl) {
+        return res.json({
+          success: false,
+          youtubeDownloadBlocked: true,
+          transcript: "",
+          visualSummary: "",
+        });
+      }
       return res.status(400).json({
         error: "No locally accessible video source available for audio transcription.",
       });
     }
 
     const meta = await probeVideoFile(localFile);
-    if (!meta.hasAudio) {
-      return res.json({
-        transcript: "",
-        noAudio: true,
-        duration: meta.duration,
+    const visualPromise = analyzeVideoKeyframes(localFile, meta.duration);
+
+    let transcriptText = "";
+    let noAudio = !meta.hasAudio;
+
+    if (meta.hasAudio) {
+      const ai = getGeminiClient();
+      const aiBeta = new GoogleGenAI({
+        apiKey: process.env.GEMINI_API_KEY,
+        apiVersion: "v1beta",
+        httpOptions: { headers: { "User-Agent": "aistudio-build" } },
       });
-    }
 
-    // Extract mono 16kHz 24kbps MP3 (capped at 480s so inline payload stays well under size limits)
-    await execFileAsync(
-      "ffmpeg",
-      [
-        "-y",
-        "-i",
-        localFile,
-        "-t",
-        "480",
-        "-vn",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-b:a",
-        "24k",
-        "-f",
-        "mp3",
-        tempMp3,
-      ],
-      { timeout: 30000 }
-    );
+      // Split longer videos into 600s chunks (up to 30 minutes = 3 chunks) so long videos aren't cut off
+      const chunkLen = 600;
+      const numChunks = Math.min(3, Math.max(1, Math.ceil(meta.duration / chunkLen)));
+      const chunkTranscripts: string[] = [];
 
-    if (!fs.existsSync(tempMp3) || fs.statSync(tempMp3).size < 200) {
-      return res.json({ transcript: "", noAudio: true, duration: meta.duration });
-    }
+      for (let i = 0; i < numChunks; i++) {
+        const startOffset = i * chunkLen;
+        const tempMp3 = `/tmp/audio_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}.mp3`;
+        tempFiles.push(tempMp3);
 
-    const audioBase64 = fs.readFileSync(tempMp3).toString("base64");
-    const ai = getGeminiClient();
+        await execFileAsync(
+          "ffmpeg",
+          [
+            "-y",
+            "-ss",
+            String(startOffset),
+            "-i",
+            localFile,
+            "-t",
+            String(chunkLen),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-b:a",
+            "20k",
+            "-f",
+            "mp3",
+            tempMp3,
+          ],
+          { timeout: 30000 }
+        );
 
-    const response = await withGeminiRetry(() =>
-      ai.models.generateContent({
-        model: "gemini-3.5-transcribe",
-        contents: {
+        if (!fs.existsSync(tempMp3) || fs.statSync(tempMp3).size < 200) {
+          continue;
+        }
+
+        const audioBase64 = fs.readFileSync(tempMp3).toString("base64");
+        const offsetNote =
+          startOffset > 0
+            ? ` Note: This audio chunk starts at ${Math.floor(startOffset / 60)}m${startOffset % 60}s into the full video; adjust all [MM:SS] timestamps by adding ${startOffset} seconds.`
+            : "";
+
+        const audioContents = {
           parts: [
             {
               inlineData: {
@@ -542,33 +870,68 @@ app.post("/api/transcribe-video", async (req, res) => {
               },
             },
             {
-              text: "Transcribe every spoken sentence accurately. Format each line strictly with its timestamp prefix like [MM:SS] Speaker: spoken text. Do not skip comedic pauses, reactions, or key insights.",
+              text: `Transcribe every spoken sentence accurately. Format each line strictly with its timestamp prefix like [MM:SS] Speaker: spoken text. Do not skip comedic pauses, reactions, or key insights.${offsetNote}`,
             },
           ],
-        },
-      })
-    );
+        };
 
-    const transcriptText = (response.text || "").trim();
+        let response;
+        try {
+          response = await withGeminiRetry(() =>
+            aiBeta.models.generateContent({
+              model: "gemini-3.5-transcribe",
+              contents: audioContents,
+            })
+          );
+        } catch (trErr: any) {
+          const msg = String(trErr?.message || "");
+          if (Number(trErr?.status) === 404 || msg.includes("404") || msg.includes("NOT_FOUND")) {
+            response = await withGeminiRetry(() =>
+              ai.models.generateContent({
+                model: "gemini-4-hydrogen",
+                contents: audioContents,
+                config: {
+                  thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+                },
+              })
+            );
+          } else {
+            throw trErr;
+          }
+        }
+
+        const chunkOut = (response.text || "").trim();
+        if (chunkOut) chunkTranscripts.push(chunkOut);
+      }
+
+      transcriptText = chunkTranscripts.join("\n").trim();
+      if (transcriptText.length === 0) noAudio = true;
+    }
+
+    const visualSummary = await visualPromise;
+
     return res.json({
       success: true,
       transcript: transcriptText,
+      visualSummary,
       duration: meta.duration,
-      noAudio: transcriptText.length === 0,
+      noAudio,
     });
   } catch (error: any) {
     console.error("Transcription error:", error);
     const formatted = formatGeminiHttpError(error);
     return res.status(formatted.status).json({ error: formatted.message, code: formatted.code });
   } finally {
-    if (fs.existsSync(tempMp3)) {
-      fs.unlink(tempMp3, () => {});
+    for (const f of tempFiles) {
+      if (fs.existsSync(f)) {
+        fs.unlink(f, () => {});
+      }
     }
   }
 });
 
 // ---------------------------------------------------------------------------
-// 4. Gemini 4 Hydrogen — Viral Highlight & Clip Detection Engine
+// 4. Gemini 4 Hydrogen — Unrestricted AI Video Clipping Director
 // ---------------------------------------------------------------------------
 app.post("/api/analyze-highlights", async (req, res) => {
   try {
@@ -576,52 +939,91 @@ app.post("/api/analyze-highlights", async (req, res) => {
       title = "Viral Video",
       description = "",
       transcript = "",
+      visualSummary = "",
       fullDuration = 180,
       filter = "all",
       targetLength = "auto",
+      customPrompt = "",
+      clipCount = 0,
+      minDurationSec = 0,
+      maxDurationSec = 0,
+      excludeRanges = [],
       chapters = [],
     } = req.body;
 
-    const totalSec = Math.max(15, Math.round(Number(fullDuration) || 180));
-    const desiredClipCount = totalSec < 45 ? 2 : totalSec < 90 ? 3 : 5;
+    const totalSec = Math.max(8, Math.round(Number(fullDuration) || 180));
+    const requestedCount = Number(clipCount) || 0;
+    const desiredClipCount =
+      requestedCount > 0
+        ? Math.max(1, Math.min(15, requestedCount))
+        : totalSec < 45
+        ? 2
+        : totalSec < 90
+        ? 3
+        : 5;
 
-    let lengthInstruction = "15 to 55 seconds per clip (natural complete story arcs)";
-    if (targetLength === "<30s") {
-      lengthInstruction = "12 to 29 seconds per clip (ultra-punchy fast TikTok hooks)";
+    let lengthInstruction = "any optimal natural duration from 8s up to 180s (complete story arc)";
+    if (Number(minDurationSec) > 0 || Number(maxDurationSec) > 0) {
+      const lo = Math.max(3, Math.round(Number(minDurationSec) || 5));
+      const hi = Math.min(totalSec, Math.max(lo + 2, Math.round(Number(maxDurationSec) || 180)));
+      lengthInstruction = `${lo} to ${hi} seconds per clip`;
+    } else if (targetLength === "5-15s") {
+      lengthInstruction = "5 to 15 seconds per clip (ultra-fast micro-hooks & reactions)";
+    } else if (targetLength === "<30s") {
+      lengthInstruction = "10 to 29 seconds per clip (ultra-punchy fast TikTok hooks)";
     } else if (targetLength === "30-60s") {
       lengthInstruction = "30 to 58 seconds per clip (deep storytelling arc with setup + payoff)";
+    } else if (targetLength === "60-180s") {
+      lengthInstruction = "60 to 180 seconds per clip (long-form YouTube Shorts / TikTok deep dives)";
     }
 
     const chaptersHint =
       Array.isArray(chapters) && chapters.length > 0
         ? `\nVideo Chapters:\n${chapters
-            .slice(0, 12)
+            .slice(0, 16)
             .map((c: any) => `- [${Math.round(c.start_time || 0)}s - ${Math.round(c.end_time || 0)}s] ${c.title}`)
             .join("\n")}`
         : "";
 
-    const systemPrompt = `You are ClipForge AI, an elite viral short-form video editor and retention strategist (like OpusClip and Klap.ai).
-Analyze the provided video metadata and timestamped transcript, and extract ${desiredClipCount} high-retention vertical 9:16 short clips optimized for TikTok, Instagram Reels, and YouTube Shorts.
+    const excludeHint =
+      Array.isArray(excludeRanges) && excludeRanges.length > 0
+        ? `\nAlready Clipped Ranges (avoid exact duplicates; find NEW distinct moments):\n${excludeRanges
+            .slice(0, 15)
+            .map((r: any) => `- ${Math.round(r.startTime || 0)}s to ${Math.round(r.endTime || 0)}s`)
+            .join("\n")}`
+        : "";
 
-STRICT RULES:
+    const customDirective = customPrompt && String(customPrompt).trim()
+      ? `\nHIGHEST PRIORITY USER AI INSTRUCTION:\n"${String(customPrompt).trim()}"\nFollow this instruction strictly when choosing moments, clip lengths, topics, hooks, and captions.`
+      : "";
+
+    const systemPrompt = `You are ClipForge AI, an unrestricted, elite multimodal video clipping director and retention strategist.
+Analyze the provided video metadata, visual keyframe descriptions, and timestamped transcript, and extract ${desiredClipCount} compelling 9:16 vertical short clips without arbitrary restrictions.${customDirective}
+
+RULES:
 1. All clip startTime and endTime values MUST fall strictly between 0 and ${totalSec} seconds. Never exceed ${totalSec}.
-2. Each clip duration MUST be ${lengthInstruction} (or up to ${totalSec}s if the source video itself is shorter).
-3. Prioritize moments matching Target Focus: "${filter}" ("all" means a mix of the strongest funny, climax/highlight, educational insights, and heated debate moments).
-4. Spread clips across distinct non-overlapping sections of the video whenever possible so the creator gets diverse viral options.
-5. Generate punchy 3-second opening hooks, genuine retention reasoning grounded in the transcript/topic, Virality/Hook/Flow/Emotion scores (78-99), best 9:16 framing suggestion ("smart_crop", "blur_fit", "split_screen", or "clean_box"), hashtags, and synchronized kinetic captions with relative start/end timestamps from 0 up to (endTime - startTime) and per-word tokens.`;
+2. Target duration per clip: ${lengthInstruction} (or up to ${totalSec}s if the source video itself is shorter).
+3. Target Focus: "${filter}" ("all" means a mix of the strongest funny, climax/highlight, educational insights, and heated debate moments, unless overridden by the user's custom AI instruction).
+4. Spread clips across distinct moments so the creator gets maximum coverage unless the user specifically asks for overlapping or sequential clips.
+5. For each clip, include:
+   - Punchy 3-second opening hook & title
+   - Virality/Hook/Flow/Emotion scores (75-99)
+   - Best 9:16 framing suggestion ("smart_crop", "blur_fit", "split_screen", or "clean_box") and panX (-100 left to +100 right, 0 center) based on visual scene cues
+   - Hashtags and synchronized kinetic captions with relative timestamps from 0 up to (endTime - startTime) and per-word tokens.`;
 
     const userPrompt = `Video Title: "${title}"
 Context / Description: ${description || "Video content"}
 Exact Total Video Duration: ${totalSec} seconds
 Target Category Focus: ${filter}
-Target Clip Length: ${targetLength}${chaptersHint}
+Requested Clip Count: ${desiredClipCount}
+Target Clip Length: ${targetLength}${chaptersHint}${excludeHint}
 
-Timestamped Transcript:
+${visualSummary ? `Visual Keyframe Analysis:\n"""\n${visualSummary.slice(0, 4500)}\n"""\n` : ""}Timestamped Transcript:
 """
-${(transcript || `No speech transcript available. Analyze based on title "${title}" and description "${description}". Partition the ${totalSec}s timeline into ${desiredClipCount} strongest pacing windows with compelling topical captions.`).slice(0, 22000)}
+${(transcript || `No speech transcript available. Analyze based on title "${title}", description "${description}", and visual keyframe context. Partition the ${totalSec}s timeline into ${desiredClipCount} strongest pacing windows with compelling captions matching what happens in those scenes.`).slice(0, 26000)}
 """
 
-Extract ${desiredClipCount} viral clips and return strictly valid JSON matching the schema.`;
+Extract ${desiredClipCount} clips and return strictly valid JSON matching the schema.`;
 
     const ai = getGeminiClient();
 
@@ -650,15 +1052,23 @@ Extract ${desiredClipCount} viral clips and return strictly valid JSON matching 
                       type: Type.STRING,
                       description: "One of: funny, highlight, educational, debate",
                     },
-                    startTime: { type: Type.NUMBER, description: `Start timestamp in seconds (0 to ${Math.max(0, totalSec - 10)})` },
+                    startTime: { type: Type.NUMBER, description: `Start timestamp in seconds (0 to ${Math.max(0, totalSec - 5)})` },
                     endTime: { type: Type.NUMBER, description: `End timestamp in seconds (strictly <= ${totalSec})` },
-                    viralityScore: { type: Type.INTEGER, description: "Overall virality score 78 to 99" },
-                    hookScore: { type: Type.INTEGER, description: "Opening 3s hook score 78 to 100" },
-                    flowScore: { type: Type.INTEGER, description: "Narrative pacing & payoff score 78 to 100" },
+                    viralityScore: { type: Type.INTEGER, description: "Overall virality score 75 to 99" },
+                    hookScore: { type: Type.INTEGER, description: "Opening 3s hook score 75 to 100" },
+                    flowScore: { type: Type.INTEGER, description: "Narrative pacing & payoff score 75 to 100" },
                     emotionScore: { type: Type.INTEGER, description: "Emotional / comedic intensity score 75 to 100" },
                     framingSuggestion: {
                       type: Type.STRING,
                       description: "Recommended 9:16 framing: smart_crop, blur_fit, split_screen, or clean_box",
+                    },
+                    panX: {
+                      type: Type.INTEGER,
+                      description: "Horizontal speaker/subject focus offset from -100 (far left) to +100 (far right), 0 center",
+                    },
+                    visualContext: {
+                      type: Type.STRING,
+                      description: "Brief visual scene description for this moment",
                     },
                     emojis: {
                       type: Type.ARRAY,
@@ -719,25 +1129,27 @@ Extract ${desiredClipCount} viral clips and return strictly valid JSON matching 
     const rawClips = Array.isArray(parsed.clips) ? parsed.clips : [];
     if (rawClips.length === 0) {
       return res.status(502).json({
-        error: "Gemini returned zero clips for this video. Please try again with a different focus or video.",
+        error: "Gemini returned zero clips for this prompt. Try adjusting your AI prompt or clip range.",
         code: "EMPTY_MODEL_RESPONSE",
       });
     }
 
-    // Clamp timestamps & normalize captions strictly against real video duration
+    // Clamp timestamps & normalize captions strictly against real video duration (unrestricted length up to 300s)
     const allowedCats = new Set(["funny", "highlight", "educational", "debate"]);
     const allowedFraming = new Set(["smart_crop", "split_screen", "blur_fit", "clean_box"]);
 
     const normalizedClips = rawClips.map((c: any, idx: number) => {
-      const minLen = Math.min(8, totalSec);
+      const minLen = Math.min(Number(minDurationSec) > 0 ? Number(minDurationSec) : 5, totalSec);
       let s = Math.max(0, Math.min(Number(c.startTime) || 0, Math.max(0, totalSec - minLen)));
       let e = Math.min(totalSec, Math.max(s + minLen, Number(c.endTime) || s + 25));
-      if (e - s > 65 && targetLength !== "auto") {
-        e = Math.min(totalSec, s + (targetLength === "<30s" ? 28 : 55));
+      if (Number(maxDurationSec) > 0 && e - s > Number(maxDurationSec)) {
+        e = Math.min(totalSec, s + Number(maxDurationSec));
+      } else if (e - s > 300) {
+        e = Math.min(totalSec, s + 300);
       }
       s = Math.round(s * 10) / 10;
       e = Math.round(e * 10) / 10;
-      const clipDur = Math.max(5, e - s);
+      const clipDur = Math.max(3, e - s);
 
       const rawCaptions = Array.isArray(c.captions) && c.captions.length > 0
         ? c.captions
@@ -777,6 +1189,7 @@ Extract ${desiredClipCount} viral clips and return strictly valid JSON matching 
 
       const cat = allowedCats.has(c.category) ? c.category : "highlight";
       const framing = allowedFraming.has(c.framingSuggestion) ? c.framingSuggestion : "smart_crop";
+      const clampedPan = Math.max(-100, Math.min(100, Math.round(Number(c.panX) || 0)));
 
       return {
         id: `clip-${Date.now()}-${idx + 1}`,
@@ -791,6 +1204,8 @@ Extract ${desiredClipCount} viral clips and return strictly valid JSON matching 
         flowScore: Math.max(70, Math.min(100, Math.round(Number(c.flowScore) || 91))),
         emotionScore: Math.max(70, Math.min(100, Math.round(Number(c.emotionScore) || 90))),
         framingSuggestion: framing,
+        panX: clampedPan,
+        visualContext: c.visualContext ? String(c.visualContext) : undefined,
         emojis: Array.isArray(c.emojis) && c.emojis.length > 0 ? c.emojis : ["🔥", "👀"],
         hashtags: Array.isArray(c.hashtags) && c.hashtags.length > 0 ? c.hashtags : ["#shorts", "#viral", "#fyp"],
         recommendedMusicTempo: c.recommendedMusicTempo || "upbeat",
@@ -806,6 +1221,76 @@ Extract ${desiredClipCount} viral clips and return strictly valid JSON matching 
     console.error("Gemini analyze-highlights error:", error);
     const formatted = formatGeminiHttpError(error);
     return res.status(formatted.status).json({ error: formatted.message, code: formatted.code });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 4B. Gemini Vision Auto-Reframe — Detect Speaker/Subject Horizontal Focus
+// ---------------------------------------------------------------------------
+app.post("/api/ai-reframe", async (req, res) => {
+  const framePath = `/tmp/reframe_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.jpg`;
+  try {
+    const { videoUrl, playableSourceUrl, timestamp = 2 } = req.body;
+    const localFile = resolveLocalVideoPath(playableSourceUrl) || resolveLocalVideoPath(videoUrl);
+    if (!localFile) {
+      return res.status(400).json({ error: "A local or uploaded video file is required for AI visual reframing." });
+    }
+
+    const seekSec = Math.max(0, Number(timestamp) || 0);
+    await execFileAsync(
+      "ffmpeg",
+      ["-y", "-ss", seekSec.toFixed(1), "-i", localFile, "-vframes", "1", "-q:v", "4", "-vf", "scale=720:-2", framePath],
+      { timeout: 15000 }
+    );
+
+    if (!fs.existsSync(framePath) || fs.statSync(framePath).size < 500) {
+      return res.status(500).json({ error: "Could not sample video frame for AI reframing." });
+    }
+
+    const imgBase64 = fs.readFileSync(framePath).toString("base64");
+    const ai = getGeminiClient();
+    const response = await withGeminiRetry(() =>
+      ai.models.generateContent({
+        model: "gemini-4-hydrogen",
+        contents: {
+          parts: [
+            { inlineData: { mimeType: "image/jpeg", data: imgBase64 } },
+            {
+              text: "Analyze this video frame for vertical 9:16 mobile reframing. Identify where the main speaker, face, or focal action sits horizontally (-100 = far left edge, 0 = center, +100 = far right edge), recommend best framingMode ('smart_crop', 'blur_fit', 'split_screen', or 'clean_box'), and describe what is in frame.",
+            },
+          ],
+        },
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              panX: { type: Type.INTEGER },
+              recommendedFraming: { type: Type.STRING },
+              subjectDescription: { type: Type.STRING },
+            },
+            required: ["panX", "recommendedFraming", "subjectDescription"],
+          },
+        },
+      })
+    );
+
+    const parsed = JSON.parse((response.text || "{}").trim());
+    const allowedFraming = new Set(["smart_crop", "split_screen", "blur_fit", "clean_box"]);
+    return res.json({
+      panX: Math.max(-100, Math.min(100, Math.round(Number(parsed.panX) || 0))),
+      recommendedFraming: allowedFraming.has(parsed.recommendedFraming) ? parsed.recommendedFraming : "smart_crop",
+      subjectDescription: parsed.subjectDescription || "Centered main subject",
+    });
+  } catch (error: any) {
+    console.error("AI reframe error:", error);
+    const formatted = formatGeminiHttpError(error);
+    return res.status(formatted.status).json({ error: formatted.message, code: formatted.code });
+  } finally {
+    if (fs.existsSync(framePath)) {
+      fs.unlink(framePath, () => {});
+    }
   }
 });
 
@@ -976,6 +1461,309 @@ Return tailored titles, captions, pinned comment prompts, thumbnail cover text, 
   }
 });
 
+// ---------------------------------------------------------------------------
+// 7B. Gemini Vision Auto-Color Grade
+// ---------------------------------------------------------------------------
+app.post("/api/ai-color-grade", async (req, res) => {
+  const framePath = `/tmp/grade_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.jpg`;
+  try {
+    const {
+      videoUrl = "",
+      playableSourceUrl = "",
+      timestamp = 1,
+      title = "",
+      hook = "",
+    } = req.body;
+
+    const localFile = resolveLocalVideoPath(playableSourceUrl) || resolveLocalVideoPath(videoUrl);
+    const parts: any[] = [];
+
+    if (localFile) {
+      const seekSec = Math.max(0, Number(timestamp) || 0);
+      try {
+        await execFileAsync(
+          "ffmpeg",
+          ["-y", "-ss", seekSec.toFixed(1), "-i", localFile, "-vframes", "1", "-q:v", "4", "-vf", "scale=640:-2", framePath],
+          { timeout: 15000 }
+        );
+        if (fs.existsSync(framePath) && fs.statSync(framePath).size > 500) {
+          parts.push({
+            inlineData: {
+              mimeType: "image/jpeg",
+              data: fs.readFileSync(framePath).toString("base64"),
+            },
+          });
+        }
+      } catch {}
+    }
+
+    parts.push({
+      text: `You are a professional mobile video colorist. ${
+        parts.length > 0
+          ? "Inspect this video frame's exposure, contrast, skin tones, and atmosphere."
+          : `Based on the video title "${title}" and hook "${hook}", recommend an engaging color grade.`
+      }
+Choose the best CSS filter preset from ["none", "grayscale", "sepia", "high_contrast", "vivid", "noir", "warm", "cool", "vintage"] and subtle fine-tune percentages:
+- filterBrightness: 80..125 (100 neutral)
+- filterContrast: 90..140 (100 neutral)
+- filterSaturate: 0..150 (100 neutral)
+Give a concise 1-sentence colorist rationale.`,
+    });
+
+    const ai = getGeminiClient();
+    const response = await withGeminiRetry(() =>
+      ai.models.generateContent({
+        model: "gemini-4-hydrogen",
+        contents: { parts },
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              videoFilter: { type: Type.STRING },
+              filterBrightness: { type: Type.INTEGER },
+              filterContrast: { type: Type.INTEGER },
+              filterSaturate: { type: Type.INTEGER },
+              rationale: { type: Type.STRING },
+            },
+            required: ["videoFilter", "filterBrightness", "filterContrast", "filterSaturate", "rationale"],
+          },
+        },
+      })
+    );
+
+    const parsed = JSON.parse((response.text || "{}").trim());
+    const allowedPresets = new Set([
+      "none",
+      "grayscale",
+      "sepia",
+      "high_contrast",
+      "vivid",
+      "noir",
+      "warm",
+      "cool",
+      "vintage",
+    ]);
+
+    return res.json({
+      videoFilter: allowedPresets.has(parsed.videoFilter) ? parsed.videoFilter : "vivid",
+      filterBrightness: Math.max(70, Math.min(135, Math.round(Number(parsed.filterBrightness) || 100))),
+      filterContrast: Math.max(75, Math.min(160, Math.round(Number(parsed.filterContrast) || 100))),
+      filterSaturate: Math.max(0, Math.min(175, Math.round(Number(parsed.filterSaturate) || 100))),
+      rationale: String(parsed.rationale || "Balanced contrast and vibrancy for mobile feeds."),
+    });
+  } catch (error: any) {
+    console.error("AI color grade error:", error);
+    const formatted = formatGeminiHttpError(error);
+    return res.status(formatted.status).json({ error: formatted.message, code: formatted.code });
+  } finally {
+    if (fs.existsSync(framePath)) {
+      fs.unlink(framePath, () => {});
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 7C. Gemini AI Caption Translator & Tone Adapter
+// ---------------------------------------------------------------------------
+app.post("/api/ai-translate-captions", async (req, res) => {
+  try {
+    const { captions = [], targetLanguage = "Spanish" } = req.body;
+    if (!Array.isArray(captions) || captions.length === 0) {
+      return res.status(400).json({ error: "Captions array is required." });
+    }
+
+    const ai = getGeminiClient();
+    const response = await withGeminiRetry(() =>
+      ai.models.generateContent({
+        model: "gemini-4-hydrogen",
+        contents: `Transform these timed short-form video captions into "${targetLanguage}".
+Keep the exact same array length (${captions.length}) and preserve start/end timestamps cleanly while making the text natural, punchy, and native for vertical short-form subtitles. Pick one impact emphasisWord per caption.
+
+Input Captions:
+${JSON.stringify(
+  captions.map((c: any) => ({
+    start: Number(c.start) || 0,
+    end: Number(c.end) || 2,
+    text: String(c.text || ""),
+  }))
+)}`,
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              captions: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    start: { type: Type.NUMBER },
+                    end: { type: Type.NUMBER },
+                    text: { type: Type.STRING },
+                    emphasisWord: { type: Type.STRING },
+                  },
+                  required: ["start", "end", "text"],
+                },
+              },
+            },
+            required: ["captions"],
+          },
+        },
+      })
+    );
+
+    const parsed = JSON.parse((response.text || "{}").trim());
+    const outCaptions = (Array.isArray(parsed.captions) ? parsed.captions : []).map((cap: any, i: number) => {
+      const orig = captions[i] || cap;
+      const start = Number(orig.start ?? cap.start) || 0;
+      const end = Math.max(start + 0.4, Number(orig.end ?? cap.end) || start + 2);
+      const text = String(cap.text || orig.text || "").trim();
+      const words = text.split(/\s+/).filter(Boolean).map((w: string, idx: number, arr: string[]) => {
+        const seg = (end - start) / Math.max(1, arr.length);
+        return {
+          w,
+          start: Math.round((start + idx * seg) * 10) / 10,
+          end: Math.round((start + (idx + 1) * seg) * 10) / 10,
+        };
+      });
+      return {
+        start,
+        end,
+        text,
+        emphasisWord: cap.emphasisWord ? String(cap.emphasisWord) : undefined,
+        words,
+      };
+    });
+
+    if (outCaptions.length === 0) {
+      return res.status(502).json({ error: "Gemini returned empty captions." });
+    }
+
+    return res.json({ captions: outCaptions });
+  } catch (error: any) {
+    console.error("AI caption translate error:", error);
+    const formatted = formatGeminiHttpError(error);
+    return res.status(formatted.status).json({ error: formatted.message, code: formatted.code });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 7D. Gemini Multi-Turn AI Studio Director (Chat + Live Studio Actions)
+// ---------------------------------------------------------------------------
+app.post("/api/ai-director", async (req, res) => {
+  try {
+    const {
+      messages = [],
+      videoContext = {},
+      activeClip = null,
+      settings = {},
+    } = req.body;
+
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: "A user message is required." });
+    }
+
+    const latestMsg = String(messages[messages.length - 1]?.text || "").trim();
+    if (!latestMsg) {
+      return res.status(400).json({ error: "Message text cannot be empty." });
+    }
+
+    const history = messages.slice(0, -1).slice(-8).map((m: any) => ({
+      role: m.role === "model" ? "model" : "user",
+      parts: [{ text: String(m.text || "") }],
+    }));
+
+    const systemInstruction = `You are the ClipForge AI Studio Director — an interactive copilot embedded inside a 9:16 short-form video editor.
+You help creators optimize hooks, caption styles, kinetic animations, color grading filters, reframing, trim points, and content strategy.
+Current Video Context:
+- Title: ${videoContext.title || "Untitled"}
+- Duration: ${videoContext.duration || 120}s
+- Summary: ${videoContext.aiSummary || "N/A"}
+- Visual Context: ${String(videoContext.visualSummary || "").slice(0, 1200) || "N/A"}
+- Transcript Excerpt: ${String(videoContext.transcript || "").slice(0, 2500) || "N/A"}
+
+Active Clip: ${
+      activeClip
+        ? `"${activeClip.title}" (${activeClip.startTime}s - ${activeClip.endTime}s), Hook: "${activeClip.hook}", Score: ${activeClip.viralityScore}%`
+        : "None selected"
+    }
+Current Studio Settings: ${JSON.stringify({
+      framingMode: settings.framingMode,
+      panX: settings.panX,
+      captionPreset: settings.captionPreset,
+      captionColor: settings.captionColor,
+      captionEntranceAnim: settings.captionEntranceAnim,
+      captionExitAnim: settings.captionExitAnim,
+      videoFilter: settings.videoFilter,
+      showHookBanner: settings.showHookBanner,
+    })}
+
+When the user asks you to make visual/style/hook/trim edits, populate ONLY the relevant fields inside "actions" (omit fields that should stay unchanged).
+Allowed enum values:
+- framingMode: "smart_crop" | "split_screen" | "blur_fit" | "clean_box"
+- captionPreset: "opus_box" | "opus_classic" | "hormozi" | "tiktok_neon" | "beast_flame" | "karaoke_fill" | "minimal_cinema"
+- captionEntranceAnim: "pop" | "slide_up" | "slide_down" | "fade" | "bounce" | "zoom_in" | "glow_burst"
+- captionExitAnim: "fade" | "slide_down" | "slide_up" | "shrink" | "pop_out" | "none"
+- videoFilter: "none" | "grayscale" | "sepia" | "high_contrast" | "vivid" | "noir" | "warm" | "cool" | "vintage"
+If the user asks to clip new moments from the video, set triggerClipMorePrompt to a clear clipping instruction.`;
+
+    const ai = getGeminiClient();
+    const chat = ai.chats.create({
+      model: "gemini-4-hydrogen",
+      history,
+      config: {
+        systemInstruction,
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            reply: { type: Type.STRING, description: "Helpful concise studio response explaining advice or changes made" },
+            actions: {
+              type: Type.OBJECT,
+              description: "Optional Studio mutations to apply automatically",
+              properties: {
+                hookBannerText: { type: Type.STRING },
+                showHookBanner: { type: Type.BOOLEAN },
+                framingMode: { type: Type.STRING },
+                panX: { type: Type.INTEGER },
+                captionPreset: { type: Type.STRING },
+                captionColor: { type: Type.STRING },
+                captionEntranceAnim: { type: Type.STRING },
+                captionExitAnim: { type: Type.STRING },
+                videoFilter: { type: Type.STRING },
+                filterBrightness: { type: Type.INTEGER },
+                filterContrast: { type: Type.INTEGER },
+                filterSaturate: { type: Type.INTEGER },
+                startTime: { type: Type.NUMBER },
+                endTime: { type: Type.NUMBER },
+                newClipTitle: { type: Type.STRING },
+                triggerClipMorePrompt: { type: Type.STRING },
+              },
+            },
+          },
+          required: ["reply"],
+        },
+      },
+    });
+
+    const response = await withGeminiRetry(() => chat.sendMessage({ message: latestMsg }));
+    const parsed = JSON.parse((response.text || "{}").trim());
+
+    return res.json({
+      reply: String(parsed.reply || "Updated your Studio settings."),
+      actions: parsed.actions || null,
+    });
+  } catch (error: any) {
+    console.error("AI director error:", error);
+    const formatted = formatGeminiHttpError(error);
+    return res.status(formatted.status).json({ error: formatted.message, code: formatted.code });
+  }
+});
+
 // Serve static public folder (samples, uploads, clips) with byte-range seeking support
 const staticHeaders = (res: express.Response) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -987,25 +1775,150 @@ app.use("/public", express.static(publicDir, { setHeaders: staticHeaders }));
 // ---------------------------------------------------------------------------
 // 8. Real FFmpeg 9:16 Video Clipping Engine
 // ---------------------------------------------------------------------------
+function formatAssTime(sec: number): string {
+  const safe = Math.max(0, sec);
+  const h = Math.floor(safe / 3600);
+  const m = Math.floor((safe % 3600) / 60);
+  const s = Math.floor(safe % 60);
+  const cs = Math.floor((safe % 1) * 100);
+  return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
+}
+
+function hexToAssBgr(hex?: string): string {
+  const clean = (hex || "#FACC15").replace("#", "");
+  if (clean.length !== 6) return "&H0015CCFA";
+  const r = clean.slice(0, 2);
+  const g = clean.slice(2, 4);
+  const b = clean.slice(4, 6);
+  return `&H00${b}${g}${r}`.toUpperCase();
+}
+
+function applyAssTextCase(text: string, textCase?: string): string {
+  if (textCase === "original") return text;
+  if (textCase === "titlecase") {
+    return text.replace(/\b\w/g, (ch) => ch.toUpperCase());
+  }
+  return text.toUpperCase();
+}
+
+function buildAssSubtitlesFile(options: {
+  captions: any[];
+  resolution: string;
+  captionColor?: string;
+  captionBaseColor?: string;
+  captionPosition?: string;
+  captionFontSize?: number;
+  captionFontFamily?: string;
+  captionTextCase?: string;
+  captionOutlineWidth?: number;
+  captionDropShadow?: boolean;
+}): string {
+  const {
+    captions,
+    resolution,
+    captionColor = "#22C55E",
+    captionBaseColor = "#FFFFFF",
+    captionPosition = "lower_third",
+    captionFontSize = 34,
+    captionFontFamily = "Montserrat",
+    captionTextCase = "uppercase",
+    captionOutlineWidth = 6,
+    captionDropShadow = true,
+  } = options;
+  const playW = resolution === "1080p" ? 1080 : 720;
+  const playH = resolution === "1080p" ? 1920 : 1280;
+  const fontSize = Math.round((resolution === "1080p" ? 1.5 : 1.0) * (captionFontSize || 34) * 1.45);
+  const marginV =
+    captionPosition === "top"
+      ? Math.round(playH * 0.72)
+      : captionPosition === "middle"
+      ? Math.round(playH * 0.45)
+      : captionPosition === "bottom"
+      ? Math.round(playH * 0.12)
+      : Math.round(playH * 0.22);
+
+  const baseBgr = hexToAssBgr(captionBaseColor);
+  const accentBgr = hexToAssBgr(captionColor);
+  const safeOutline = Math.max(0, Math.min(12, Math.round(Number(captionOutlineWidth) ?? 6)));
+  const shadowVal = captionDropShadow ? 2 : 0;
+  const assFont =
+    captionFontFamily === "Rubik Mono One"
+      ? "Impact"
+      : captionFontFamily === "Plus Jakarta Sans"
+      ? "DejaVu Sans"
+      : "Arial Black";
+
+  const header = `[Script Info]
+ScriptType: v4.00+
+PlayResX: ${playW}
+PlayResY: ${playH}
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,${assFont},${fontSize},${baseBgr},${accentBgr},&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,${safeOutline},${shadowVal},2,48,48,${marginV},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`;
+
+  const events = captions
+    .filter((c) => c && c.text)
+    .map((c) => {
+      const start = formatAssTime(Number(c.start) || 0);
+      const end = formatAssTime(Math.max((Number(c.start) || 0) + 0.5, Number(c.end) || 3));
+      let text = applyAssTextCase(
+        String(c.text || "").replace(/\r?\n/g, " ").replace(/[{}]/g, ""),
+        captionTextCase
+      );
+      if (c.emphasisWord) {
+        const emp = applyAssTextCase(String(c.emphasisWord).trim(), captionTextCase);
+        if (emp) {
+          const escaped = emp.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          text = text.replace(new RegExp(`(${escaped})`, "i"), `{\\c${accentBgr}\\b1}$1{\\c${baseBgr}}`);
+        }
+      }
+      return `Dialogue: 0,${start},${end},Default,,0,0,0,,${text}`;
+    });
+
+  return `${header}\n${events.join("\n")}\n`;
+}
+
 function buildVerticalFilter(
   resolution: string,
   framingMode: string,
   panX: number
-): string {
+): { filter: string; isComplex: boolean } {
   const outW = resolution === "1080p" ? 1080 : 720;
   const outH = resolution === "1080p" ? 1920 : 1280;
 
   if (framingMode === "blur_fit") {
-    return `[0:v]split=2[bg][fg];[bg]scale=${outW}:${outH}:force_original_aspect_ratio=increase,crop=${outW}:${outH},boxblur=20:5,eq=brightness=-0.12[bgb];[fg]scale=${outW}:-2:force_original_aspect_ratio=decrease[fgb];[bgb][fgb]overlay=(W-w)/2:(H-h)/2,setsar=1`;
+    return {
+      filter: `[0:v]split=2[bg][fg];[bg]scale=${outW}:${outH}:force_original_aspect_ratio=increase,crop=${outW}:${outH},boxblur=20:5,eq=brightness=-0.12[bgb];[fg]scale=${outW}:-2:force_original_aspect_ratio=decrease[fgb];[bgb][fgb]overlay=(W-w)/2:(H-h)/2,setsar=1`,
+      isComplex: true,
+    };
+  }
+  if (framingMode === "split_screen") {
+    const halfH = Math.round(outH / 2);
+    return {
+      filter: `[0:v]split=2[topv][botv];[topv]scale=${outW}:${halfH}:force_original_aspect_ratio=increase,crop=${outW}:${halfH}[t];[botv]scale=${outW}:${halfH}:force_original_aspect_ratio=increase,crop=${outW}:${halfH},boxblur=10:2,eq=saturation=1.25[b];[t][b]vstack=inputs=2,setsar=1`,
+      isComplex: true,
+    };
   }
   if (framingMode === "clean_box") {
-    return `scale=${outW}:${outH}:force_original_aspect_ratio=decrease,pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2:color=#09090b,setsar=1`;
+    return {
+      filter: `scale=${outW}:${outH}:force_original_aspect_ratio=decrease,pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2:color=#09090b,setsar=1`,
+      isComplex: false,
+    };
   }
 
-  // Default smart_crop (or split_screen fallback on FFmpeg): full 9:16 crop with optional pan offset
+  // smart_crop: full 9:16 crop with speaker/subject pan offset
   const clampedPan = Math.max(-100, Math.min(100, Number(panX) || 0));
   const panFactor = (clampedPan + 100) / 200; // 0.0 (left) .. 0.5 (center) .. 1.0 (right)
-  return `scale=-2:${outH},crop='min(iw,${outW})':${outH}:'(iw-min(iw,${outW}))*${panFactor.toFixed(3)}':0,scale=${outW}:${outH}:force_original_aspect_ratio=increase,crop=${outW}:${outH},setsar=1`;
+  return {
+    filter: `scale=-2:${outH},crop='min(iw,${outW})':${outH}:'(iw-min(iw,${outW}))*${panFactor.toFixed(3)}':0,scale=${outW}:${outH}:force_original_aspect_ratio=increase,crop=${outW}:${outH},setsar=1`,
+    isComplex: false,
+  };
 }
 
 async function clipVideoSegment(options: {
@@ -1019,6 +1932,16 @@ async function clipVideoSegment(options: {
   panX?: number;
   title?: string;
   clipId?: string;
+  burnCaptions?: boolean;
+  captions?: any[];
+  captionColor?: string;
+  captionBaseColor?: string;
+  captionPosition?: string;
+  captionFontSize?: number;
+  captionFontFamily?: string;
+  captionTextCase?: string;
+  captionOutlineWidth?: number;
+  captionDropShadow?: boolean;
 }): Promise<{ downloadUrl: string; filename: string; duration: number }> {
   const {
     videoUrl = "",
@@ -1031,14 +1954,25 @@ async function clipVideoSegment(options: {
     panX = 0,
     title = "clip",
     clipId = `clip_${Date.now()}`,
+    burnCaptions = false,
+    captions = [],
+    captionColor = "#22C55E",
+    captionBaseColor = "#FFFFFF",
+    captionPosition = "lower_third",
+    captionFontSize = 34,
+    captionFontFamily = "Montserrat",
+    captionTextCase = "uppercase",
+    captionOutlineWidth = 6,
+    captionDropShadow = true,
   } = options;
 
   const safeClipId = clipId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 32);
   const cleanTitle = title.replace(/[^a-zA-Z0-9]/g, "_").toLowerCase().slice(0, 20) || "clip";
-  const clipFilename = `${safeClipId}_${cleanTitle}_${resolution}_${framingMode}.mp4`;
+  const subTag = burnCaptions && Array.isArray(captions) && captions.length > 0 ? "_sub" : "";
+  const clipFilename = `${safeClipId}_${cleanTitle}_${resolution}_${framingMode}${subTag}.mp4`;
   const finalOut = path.join(clipsDir, clipFilename);
 
-  if (fs.existsSync(finalOut) && fs.statSync(finalOut).size > 10000) {
+  if (!burnCaptions && fs.existsSync(finalOut) && fs.statSync(finalOut).size > 10000) {
     return {
       downloadUrl: `/clips/${clipFilename}`,
       filename: clipFilename,
@@ -1047,10 +1981,10 @@ async function clipVideoSegment(options: {
   }
 
   const startSec = Math.max(0, Math.floor(startTime));
-  const durSec = Math.max(3, Math.min(120, Math.ceil(duration)));
+  const durSec = Math.max(3, Math.min(300, Math.ceil(duration)));
   const endSec = startSec + durSec;
 
-  // Prefer locally accessible file (uploads, samples, or cached YouTube file)
+  // Prefer locally accessible file (uploads, samples, or cached URL file)
   let localInput =
     resolveLocalVideoPath(playableSourceUrl) || resolveLocalVideoPath(videoUrl);
 
@@ -1073,23 +2007,30 @@ async function clipVideoSegment(options: {
   let tempYtDownload: string | null = null;
   if (!localInput && targetYt) {
     const rawTemp = `/tmp/yt_sec_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.mp4`;
-    await execFileAsync(
-      ytdlpBin,
-      [
-        "--js-runtimes",
-        "node",
-        "--no-check-certificates",
-        "--no-playlist",
-        "--download-sections",
-        `*${startSec}-${endSec}`,
-        "-f",
-        "best[height<=720][ext=mp4]/best[ext=mp4]/best",
-        "-o",
-        rawTemp,
-        targetYt,
-      ],
-      { timeout: 45000, maxBuffer: 10 * 1024 * 1024 }
-    );
+    try {
+      await execFileAsync(
+        ensureYtdlpReady(),
+        [
+          "--js-runtimes",
+          "node",
+          "--no-check-certificates",
+          "--no-playlist",
+          "--download-sections",
+          `*${startSec}-${endSec}`,
+          "-f",
+          "best[height<=720][ext=mp4]/best[ext=mp4]/best",
+          "-o",
+          rawTemp,
+          targetYt,
+        ],
+        { timeout: 35000, maxBuffer: 10 * 1024 * 1024 }
+      );
+    } catch (ytErr: any) {
+      if (isYoutubeBotWallError(ytErr)) {
+        throw new Error("YOUTUBE_BOT_WALL: YouTube restricted raw MP4 download on this server IP.");
+      }
+      throw ytErr;
+    }
     if (!fs.existsSync(rawTemp) || fs.statSync(rawTemp).size < 1000) {
       throw new Error(`Failed to extract section ${startSec}s-${endSec}s from YouTube source.`);
     }
@@ -1101,22 +2042,44 @@ async function clipVideoSegment(options: {
     throw new Error("Source video file is unavailable for server clipping.");
   }
 
+  let tempAssFile: string | null = null;
   try {
     const probe = await probeVideoFile(localInput);
-    const vf = buildVerticalFilter(resolution, framingMode, panX);
-    const usesFilterComplex = framingMode === "blur_fit";
+    const { filter: baseFilter, isComplex } = buildVerticalFilter(resolution, framingMode, panX);
+    let finalFilter = baseFilter;
+
+    if (burnCaptions && Array.isArray(captions) && captions.length > 0) {
+      tempAssFile = `/tmp/sub_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.ass`;
+      fs.writeFileSync(
+        tempAssFile,
+        buildAssSubtitlesFile({
+          captions,
+          resolution,
+          captionColor,
+          captionBaseColor,
+          captionPosition,
+          captionFontSize,
+          captionFontFamily,
+          captionTextCase,
+          captionOutlineWidth,
+          captionDropShadow,
+        }),
+        "utf-8"
+      );
+      const escapedAss = tempAssFile.replace(/:/g, "\\:");
+      finalFilter = `${baseFilter},ass=${escapedAss}`;
+    }
 
     const ffArgs: string[] = ["-y"];
     if (!tempYtDownload) {
-      // For local/cached full file, seek directly to startTime
       ffArgs.push("-ss", String(startSec));
     }
     ffArgs.push("-i", localInput, "-t", String(durSec));
 
-    if (usesFilterComplex) {
-      ffArgs.push("-filter_complex", vf);
+    if (isComplex) {
+      ffArgs.push("-filter_complex", finalFilter);
     } else {
-      ffArgs.push("-vf", vf);
+      ffArgs.push("-vf", finalFilter);
     }
 
     ffArgs.push(
@@ -1137,7 +2100,7 @@ async function clipVideoSegment(options: {
     ffArgs.push("-movflags", "+faststart", finalOut);
 
     await execFileAsync("ffmpeg", ffArgs, {
-      timeout: 45000,
+      timeout: 60000,
       maxBuffer: 10 * 1024 * 1024,
     });
 
@@ -1154,6 +2117,9 @@ async function clipVideoSegment(options: {
     if (tempYtDownload && fs.existsSync(tempYtDownload)) {
       fs.unlink(tempYtDownload, () => {});
     }
+    if (tempAssFile && fs.existsSync(tempAssFile)) {
+      fs.unlink(tempAssFile, () => {});
+    }
   }
 }
 
@@ -1164,6 +2130,7 @@ app.post("/api/auto-clip", async (req, res) => {
       videoUrl = "",
       playableSourceUrl = "",
       youtubeUrl = "",
+      youtubeDownloadBlocked = false,
       clips = [],
     } = req.body;
 
@@ -1171,15 +2138,31 @@ app.post("/api/auto-clip", async (req, res) => {
       return res.status(400).json({ error: "Clips array is required" });
     }
 
+    const hasLocal = Boolean(
+      resolveLocalVideoPath(playableSourceUrl) || resolveLocalVideoPath(videoUrl)
+    );
+    if (!hasLocal && youtubeDownloadBlocked && youtubeUrl) {
+      return res.json({
+        success: true,
+        youtubeEmbedFallback: true,
+        clips,
+      });
+    }
+
     const clippedResults: any[] = new Array(clips.length);
     const concurrency = 2;
     let cursor = 0;
+    let botWallHit = false;
 
     const worker = async () => {
       while (cursor < clips.length) {
         const idx = cursor++;
+        if (botWallHit) {
+          clippedResults[idx] = { ...clips[idx] };
+          continue;
+        }
         const clip = clips[idx];
-        const dur = Math.max(5, Math.round((clip.endTime || 30) - (clip.startTime || 0)));
+        const dur = Math.max(3, Math.round((clip.endTime || 30) - (clip.startTime || 0)));
         try {
           const result = await clipVideoSegment({
             videoUrl,
@@ -1189,7 +2172,7 @@ app.post("/api/auto-clip", async (req, res) => {
             duration: dur,
             resolution: "720p",
             framingMode: clip.framingSuggestion || "smart_crop",
-            panX: 0,
+            panX: Number(clip.panX) || 0,
             title: clip.title || `clip_${idx + 1}`,
             clipId: clip.id || `clip_${Date.now()}_${idx}`,
           });
@@ -1200,6 +2183,9 @@ app.post("/api/auto-clip", async (req, res) => {
           };
         } catch (clipErr: any) {
           console.warn(`Clip #${idx + 1} render warning:`, clipErr?.message);
+          if (String(clipErr?.message || "").includes("YOUTUBE_BOT_WALL")) {
+            botWallHit = true;
+          }
           clippedResults[idx] = {
             ...clip,
             clipError: clipErr?.message || "Clip render failed",
@@ -1214,6 +2200,13 @@ app.post("/api/auto-clip", async (req, res) => {
 
     const validCount = clippedResults.filter((c) => Boolean(c?.clipVideoUrl)).length;
     if (validCount === 0) {
+      if (botWallHit && youtubeUrl) {
+        return res.json({
+          success: true,
+          youtubeEmbedFallback: true,
+          clips,
+        });
+      }
       const firstErr = clippedResults.find((c) => c?.clipError)?.clipError || "Unable to clip video segments.";
       return res.status(500).json({ error: firstErr, clips: clippedResults });
     }
@@ -1225,7 +2218,7 @@ app.post("/api/auto-clip", async (req, res) => {
   }
 });
 
-// Single 9:16 Video Clipper / Re-clipper endpoint
+// Single 9:16 Video Clipper / Re-clipper endpoint (supports burned ASS captions)
 app.post("/api/clip-video", async (req, res) => {
   try {
     const {
@@ -1239,6 +2232,16 @@ app.post("/api/clip-video", async (req, res) => {
       panX = 0,
       title = "clip",
       clipId,
+      burnCaptions = false,
+      captions = [],
+      captionColor = "#22C55E",
+      captionBaseColor = "#FFFFFF",
+      captionPosition = "lower_third",
+      captionFontSize = 34,
+      captionFontFamily = "Montserrat",
+      captionTextCase = "uppercase",
+      captionOutlineWidth = 6,
+      captionDropShadow = true,
     } = req.body;
 
     const result = await clipVideoSegment({
@@ -1252,6 +2255,16 @@ app.post("/api/clip-video", async (req, res) => {
       panX,
       title,
       clipId: clipId || `clip_${Date.now()}`,
+      burnCaptions: Boolean(burnCaptions),
+      captions,
+      captionColor,
+      captionBaseColor,
+      captionPosition,
+      captionFontSize,
+      captionFontFamily,
+      captionTextCase,
+      captionOutlineWidth,
+      captionDropShadow,
     });
 
     return res.json({
@@ -1284,8 +2297,8 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, () => {
-    console.log(`ClipForge server running at http://localhost:${PORT}`);
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`ClipForge server running at http://0.0.0.0:${PORT}`);
   });
 }
 
