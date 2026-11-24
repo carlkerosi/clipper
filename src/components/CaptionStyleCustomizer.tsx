@@ -28,6 +28,7 @@ import {
   CaptionEntranceAnimation,
   CaptionExitAnimation,
 } from '../types';
+import { parseJsonResponse } from '../utils/safeFetchJson';
 
 interface CaptionStyleCustomizerProps {
   settings: ExportSettings;
@@ -264,7 +265,7 @@ export const CaptionStyleCustomizer: React.FC<CaptionStyleCustomizerProps> = ({
         }),
       });
 
-      const data = await res.json();
+      const data = await parseJsonResponse(res, 'Failed to generate alternative hooks');
       if (!res.ok) {
         throw new Error(data.error || 'Failed to generate alternative hooks.');
       }

@@ -3,6 +3,7 @@ import { X, Upload, Film, Sparkles, ArrowRight, Loader2, Globe } from 'lucide-re
 import { SAMPLE_VIDEOS } from '../data/sampleVideos';
 import { VideoSource } from '../types';
 import thumbNeuro from '../assets/images/thumb_neuro_lab_1795100814397.jpg';
+import { parseJsonResponse } from '../utils/safeFetchJson';
 
 interface VideoImportModalProps {
   isOpen: boolean;
@@ -51,7 +52,7 @@ export const VideoImportModal: React.FC<VideoImportModalProps> = ({
         body: formData,
       });
 
-      const data = await uploadRes.json();
+      const data = await parseJsonResponse(uploadRes, 'Video upload failed');
       if (!uploadRes.ok || !data.playableSourceUrl) {
         throw new Error(data.error || 'Upload failed');
       }
@@ -82,8 +83,11 @@ export const VideoImportModal: React.FC<VideoImportModalProps> = ({
 
   const handleUrlSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const rawUrl = youtubeUrl.trim();
+    let rawUrl = youtubeUrl.trim();
     if (!rawUrl) return;
+    if (!/^https?:\/\//i.test(rawUrl) && rawUrl.includes('.')) {
+      rawUrl = `https://${rawUrl}`;
+    }
 
     const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|shorts\/|watch\?v=|&v=)([^#&?]*).*/;
     const match = rawUrl.match(regExp);
@@ -244,14 +248,15 @@ export const VideoImportModal: React.FC<VideoImportModalProps> = ({
             <form onSubmit={handleUrlSubmit} className="space-y-4">
               <div className="space-y-1.5">
                 <label className="text-xs font-medium text-zinc-300">
-                  Any Video Link (YouTube, TikTok, Vimeo, Instagram, X, or Direct MP4)
+                  Any Video Link (YouTube, TikTok, Vimeo, X, or Direct MP4)
                 </label>
                 <div className="relative flex items-center">
                   <div className="absolute left-3 text-zinc-500">
                     <Globe className="w-4 h-4 text-violet-400" />
                   </div>
                   <input
-                    type="url"
+                    type="text"
+                    inputMode="url"
                     value={youtubeUrl}
                     onChange={(e) => setYoutubeUrl(e.target.value)}
                     placeholder="https://www.youtube.com/watch?v=... or https://example.com/video.mp4"

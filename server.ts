@@ -1,6 +1,7 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import multer from "multer";
@@ -8,6 +9,9 @@ import dotenv from "dotenv";
 import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 
 dotenv.config();
+
+const OAUTH_STATE_SECRET =
+  process.env.OAUTH_STATE_SECRET || crypto.randomBytes(32).toString("hex");
 
 const execFileAsync = promisify(execFile);
 
@@ -95,10 +99,28 @@ function getGeminiClient() {
   });
 }
 
-// Exponential backoff retry for transient Gemini errors (429 / 503 / network)
+function isTransientGeminiError(err: any): boolean {
+  const status = Number(err?.status || err?.code || err?.statusCode);
+  const msg = String(err?.message || "").toLowerCase();
+  return (
+    status === 429 ||
+    status === 503 ||
+    status === 500 ||
+    status === 504 ||
+    msg.includes("503") ||
+    msg.includes("unavailable") ||
+    msg.includes("high demand") ||
+    msg.includes("resource_exhausted") ||
+    msg.includes("etimedout") ||
+    msg.includes("econnreset") ||
+    msg.includes("timeout")
+  );
+}
+
+// Retry helper with fast exponential backoff for transient Gemini errors
 async function withGeminiRetry<T>(
   operation: () => Promise<T>,
-  maxAttempts = 3
+  maxAttempts = 2
 ): Promise<T> {
   let lastError: any;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -106,29 +128,79 @@ async function withGeminiRetry<T>(
       return await operation();
     } catch (err: any) {
       lastError = err;
-      const status = err?.status || err?.code;
-      const msg = String(err?.message || "");
-      const isTransient =
-        status === 429 ||
-        status === 503 ||
-        status === 500 ||
-        msg.includes("503") ||
-        msg.includes("UNAVAILABLE") ||
-        msg.includes("high demand") ||
-        msg.includes("RESOURCE_EXHAUSTED") ||
-        msg.includes("ETIMEDOUT") ||
-        msg.includes("ECONNRESET");
-
-      if (!isTransient || attempt === maxAttempts) {
+      if (!isTransientGeminiError(err) || attempt === maxAttempts) {
         throw err;
       }
-
-      const delayMs = Math.min(8000, 1000 * Math.pow(2, attempt - 1)) + Math.round(Math.random() * 400);
-      console.warn(`Gemini transient error (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms:`, msg);
+      const delayMs = 600 * attempt + Math.round(Math.random() * 300);
+      console.warn(`Gemini transient error (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms:`, err?.message);
       await new Promise((r) => setTimeout(r, delayMs));
     }
   }
   throw lastError;
+}
+
+function withGeminiTimeout<T>(promise: Promise<T>, ms = 18000, label = "Gemini API"): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => {
+        const err: any = new Error(`${label} timeout after ${ms}ms`);
+        err.status = 504;
+        reject(err);
+      }, ms)
+    ),
+  ]);
+}
+
+// Primary generation helper with automatic fallback from gemini-4-hydrogen -> gemini-3.1-flash-lite on transient 503/429/timeout
+async function generateContentResilient(
+  ai: GoogleGenAI,
+  params: {
+    model?: string;
+    contents: any;
+    config?: Record<string, any>;
+    timeoutMs?: number;
+  }
+) {
+  const primaryModel = params.model || "gemini-4-hydrogen";
+  const timeoutMs = params.timeoutMs || 18000;
+  try {
+    return await withGeminiRetry(
+      () =>
+        withGeminiTimeout(
+          ai.models.generateContent({
+            model: primaryModel,
+            contents: params.contents,
+            config: params.config,
+          }),
+          timeoutMs,
+          primaryModel
+        ),
+      2
+    );
+  } catch (err: any) {
+    if (isTransientGeminiError(err) && primaryModel !== "gemini-3.1-flash-lite") {
+      console.warn(`Primary model ${primaryModel} busy (${err?.status || err?.message}), falling back to gemini-3.1-flash-lite`);
+      const fallbackConfig = params.config ? { ...params.config } : undefined;
+      if (fallbackConfig && "thinkingConfig" in fallbackConfig) {
+        delete fallbackConfig.thinkingConfig;
+      }
+      return await withGeminiRetry(
+        () =>
+          withGeminiTimeout(
+            ai.models.generateContent({
+              model: "gemini-3.1-flash-lite",
+              contents: params.contents,
+              config: fallbackConfig,
+            }),
+            timeoutMs,
+            "gemini-3.1-flash-lite"
+          ),
+        2
+      );
+    }
+    throw err;
+  }
 }
 
 function formatGeminiHttpError(error: any): { status: number; message: string; code: string } {
@@ -339,12 +411,12 @@ async function ensureYoutubeCached(
           "-f",
           "best[height<=720][ext=mp4]/best[ext=mp4]/best",
           "--max-filesize",
-          "250M",
+          "100M",
           "-o",
           tmpOut,
           youtubeUrl,
         ],
-        { timeout: 45000, maxBuffer: 10 * 1024 * 1024 }
+        { timeout: 20000, maxBuffer: 10 * 1024 * 1024 }
       );
       if (fs.existsSync(tmpOut) && fs.statSync(tmpOut).size > 50000) {
         fs.renameSync(tmpOut, outPath);
@@ -410,8 +482,9 @@ app.post("/api/youtube-info", async (req, res) => {
     let transcript = "";
     let ytdlpBotBlocked = false;
 
-    try {
-      const { stdout } = await execFileAsync(
+    // Run yt-dlp metadata + oEmbed + watch HTML concurrently so YouTube ingestion never stalls sequentially
+    const [ytDlpSettled, oembedSettled, watchSettled] = await Promise.allSettled([
+      execFileAsync(
         ensureYtdlpReady(),
         [
           "--js-runtimes",
@@ -430,19 +503,36 @@ app.post("/api/youtube-info", async (req, res) => {
           "--skip-download",
           url,
         ],
-        { timeout: 20000, maxBuffer: 15 * 1024 * 1024 }
-      );
-      if (stdout) {
-        const lastJsonLine = stdout
-          .trim()
-          .split("\n")
-          .reverse()
-          .find((l) => l.trim().startsWith("{"));
-        if (lastJsonLine) {
+        { timeout: 12000, maxBuffer: 15 * 1024 * 1024 }
+      ),
+      fetch(
+        `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`,
+        { signal: AbortSignal.timeout(5000) }
+      ).then((r) => (r.ok ? r.json() : null)),
+      fetch(url, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+          "Accept-Language": "en-US,en;q=0.9",
+          Cookie: "CONSENT=YES+cb.20210328-17-p0.en+FX+123",
+        },
+        signal: AbortSignal.timeout(6000),
+      }).then((r) => (r.ok ? r.text() : "")),
+    ]);
+
+    if (ytDlpSettled.status === "fulfilled" && ytDlpSettled.value?.stdout) {
+      const lastJsonLine = ytDlpSettled.value.stdout
+        .trim()
+        .split("\n")
+        .reverse()
+        .find((l) => l.trim().startsWith("{"));
+      if (lastJsonLine) {
+        try {
           info = JSON.parse(lastJsonLine);
-        }
+        } catch {}
       }
-    } catch (ytErr: any) {
+    } else if (ytDlpSettled.status === "rejected") {
+      const ytErr = ytDlpSettled.reason;
       console.warn("yt-dlp metadata fetch warning:", ytErr?.message);
       if (isYoutubeBotWallError(ytErr)) {
         ytdlpBotBlocked = true;
@@ -459,7 +549,6 @@ app.post("/api/youtube-info", async (req, res) => {
         const vttRaw = fs.readFileSync(vttPath, "utf-8");
         transcript = parseVttToTranscript(vttRaw);
       }
-      // Clean up temp subtitle files
       for (const f of vttFiles) {
         fs.unlink(path.join("/tmp", f), () => {});
       }
@@ -467,78 +556,52 @@ app.post("/api/youtube-info", async (req, res) => {
       console.warn("VTT parse warning:", vttErr);
     }
 
+    const oe: any = oembedSettled.status === "fulfilled" ? oembedSettled.value : null;
+    const html: string = watchSettled.status === "fulfilled" ? watchSettled.value || "" : "";
+
     const resolvedId = info?.id || videoId || metaId;
-    let resolvedTitle = info?.title || "";
+    let resolvedTitle = info?.title || oe?.title || "";
     let resolvedDesc = (info?.description || "").slice(0, 1500);
-    let resolvedChannel = info?.uploader || info?.channel || "";
+    let resolvedChannel = info?.uploader || info?.channel || oe?.author_name || "";
     let resolvedThumb =
       info?.thumbnail ||
-      (videoId
-        ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`
-        : "");
+      oe?.thumbnail_url ||
+      (videoId ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg` : "");
     let duration = Math.round(Number(info?.duration) || 0);
     let chapters: any[] = Array.isArray(info?.chapters) ? info.chapters.slice(0, 20) : [];
 
-    // Fallback metadata & captions via YouTube oEmbed + watch HTML when yt-dlp hits bot check on cloud IPs
-    if (!info || !duration || !transcript) {
-      try {
-        const oembedRes = await fetch(
-          `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`,
-          { signal: AbortSignal.timeout(6000) }
-        );
-        if (oembedRes.ok) {
-          const oe: any = await oembedRes.json();
-          if (!resolvedTitle && oe.title) resolvedTitle = oe.title;
-          if (!resolvedChannel && oe.author_name) resolvedChannel = oe.author_name;
-          if (!info?.thumbnail && oe.thumbnail_url) resolvedThumb = oe.thumbnail_url;
+    if (html) {
+      if (!duration) {
+        const durMatch = html.match(/"lengthSeconds":"(\d+)"/);
+        if (durMatch?.[1]) duration = Number(durMatch[1]);
+      }
+      if (!resolvedDesc) {
+        const descMatch = html.match(/"shortDescription":"((?:[^"\\]|\\.)*)"/);
+        if (descMatch?.[1]) {
+          try {
+            resolvedDesc = JSON.parse(`"${descMatch[1]}"`).slice(0, 1500);
+          } catch {}
         }
-      } catch {}
-
-      try {
-        const watchRes = await fetch(url, {
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-          },
-          signal: AbortSignal.timeout(8000),
-        });
-        if (watchRes.ok) {
-          const html = await watchRes.text();
-          if (!duration) {
-            const durMatch = html.match(/"lengthSeconds":"(\d+)"/);
-            if (durMatch?.[1]) duration = Number(durMatch[1]);
-          }
-          if (!resolvedDesc) {
-            const descMatch = html.match(/"shortDescription":"((?:[^"\\]|\\.)*)"/);
-            if (descMatch?.[1]) {
-              try {
-                resolvedDesc = JSON.parse(`"${descMatch[1]}"`).slice(0, 1500);
-              } catch {}
+      }
+      if (!transcript) {
+        const capMatch = html.match(/"captionTracks":(\[[^\]]+\])/);
+        if (capMatch?.[1]) {
+          try {
+            const tracks = JSON.parse(capMatch[1]);
+            const enTrack =
+              tracks.find((t: any) => String(t.languageCode || "").startsWith("en")) || tracks[0];
+            if (enTrack?.baseUrl) {
+              const vttRes = await fetch(`${enTrack.baseUrl}&fmt=vtt`, {
+                signal: AbortSignal.timeout(5000),
+              });
+              if (vttRes.ok) {
+                const vttRaw = await vttRes.text();
+                transcript = parseVttToTranscript(vttRaw);
+              }
             }
-          }
-          if (!transcript) {
-            const capMatch = html.match(/"captionTracks":(\[[^\]]+\])/);
-            if (capMatch?.[1]) {
-              try {
-                const tracks = JSON.parse(capMatch[1]);
-                const enTrack =
-                  tracks.find((t: any) => String(t.languageCode || "").startsWith("en")) ||
-                  tracks[0];
-                if (enTrack?.baseUrl) {
-                  const vttRes = await fetch(`${enTrack.baseUrl}&fmt=vtt`, {
-                    signal: AbortSignal.timeout(6000),
-                  });
-                  if (vttRes.ok) {
-                    const vttRaw = await vttRes.text();
-                    transcript = parseVttToTranscript(vttRaw);
-                  }
-                }
-              } catch {}
-            }
-          }
+          } catch {}
         }
-      } catch {}
+      }
     }
 
     // Grounded Gemini URL + Search enrichment when YouTube blocks raw HTML/transcript scraping on datacenter IPs
@@ -554,16 +617,14 @@ Return ONLY a raw JSON object (no markdown fences) with these keys:
   "summary": "<concise description of what happens / is discussed in this video>",
   "highlightsContext": "<timestamped outline e.g. [00:00] intro ... [00:45] key point ...>"
 }`;
-        const gRes = await withGeminiRetry(() =>
-          ai.models.generateContent({
-            model: "gemini-4-hydrogen",
-            contents: searchPrompt,
-            config: {
-              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-              tools: [{ googleSearch: {} }, { urlContext: {} }],
-            },
-          })
-        );
+        const gRes = await generateContentResilient(ai, {
+          contents: searchPrompt,
+          timeoutMs: 12000,
+          config: {
+            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+            tools: [{ googleSearch: {} }],
+          },
+        });
         const rawText = (gRes.text || "").trim();
         const jsonMatch = rawText.match(/\{[\s\S]*\}/);
         if (jsonMatch?.[0]) {
@@ -585,9 +646,9 @@ Return ONLY a raw JSON object (no markdown fences) with these keys:
 
     duration = Math.max(10, duration || 180);
 
-    // Cache full MP4 when not bot-blocked and duration <= 20 minutes
+    // Cache full MP4 only when yt-dlp metadata succeeded, not bot-blocked, and duration <= 15 minutes
     let playableSourceUrl: string | null = null;
-    if (videoId && !ytdlpBotBlocked && duration <= 1200) {
+    if (videoId && ytDlpSettled.status === "fulfilled" && !ytdlpBotBlocked && duration <= 900) {
       playableSourceUrl = await ensureYoutubeCached(url, resolvedId);
     }
 
@@ -621,13 +682,33 @@ app.post("/api/ingest-url", async (req, res) => {
     }
 
     const cleanUrl = url.trim();
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(cleanUrl);
+      if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+        return res.status(400).json({ error: "Only http and https video URLs are supported." });
+      }
+    } catch {
+      return res.status(400).json({ error: "Invalid video URL." });
+    }
+
     const outName = `url_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.mp4`;
     const outPath = path.join(uploadsDir, outName);
 
-    // 1. Check if URL points directly to a video file (.mp4, .mov, .webm, .m4v, or video/* content-type)
-    const looksDirectMedia = /\.(mp4|mov|webm|m4v)(\?.*)?$/i.test(cleanUrl);
-    if (looksDirectMedia) {
-      const dlRes = await fetch(cleanUrl, { signal: AbortSignal.timeout(90000) });
+    // 1. Check if URL points directly to a video file (.mp4, .mov, .webm, .m4v, or video/* Content-Type)
+    let isDirectMedia = /\.(mp4|mov|webm|m4v)(\?.*)?$/i.test(cleanUrl);
+    if (!isDirectMedia) {
+      try {
+        const headRes = await fetch(cleanUrl, { method: "HEAD", signal: AbortSignal.timeout(5000) });
+        const ct = String(headRes.headers.get("content-type") || "").toLowerCase();
+        if (headRes.ok && ct.startsWith("video/")) {
+          isDirectMedia = true;
+        }
+      } catch {}
+    }
+
+    if (isDirectMedia) {
+      const dlRes = await fetch(cleanUrl, { signal: AbortSignal.timeout(45000) });
       if (!dlRes.ok) {
         return res.status(400).json({ error: `Could not download video URL (HTTP ${dlRes.status}).` });
       }
@@ -643,7 +724,7 @@ app.post("/api/ingest-url", async (req, res) => {
         success: true,
         id: `url-${Date.now()}`,
         title: urlTitle,
-        channelName: new URL(cleanUrl).hostname,
+        channelName: parsedUrl.hostname,
         playableSourceUrl: `/uploads/${outName}`,
         duration: meta.duration,
         width: meta.width,
@@ -665,7 +746,7 @@ app.post("/api/ingest-url", async (req, res) => {
           "--skip-download",
           cleanUrl,
         ],
-        { timeout: 25000, maxBuffer: 15 * 1024 * 1024 }
+        { timeout: 15000, maxBuffer: 15 * 1024 * 1024 }
       );
       const lastLine = stdout.trim().split("\n").reverse().find((l) => l.trim().startsWith("{"));
       if (lastLine) info = JSON.parse(lastLine);
@@ -681,12 +762,12 @@ app.post("/api/ingest-url", async (req, res) => {
         "-f",
         "best[height<=1080][ext=mp4]/best[ext=mp4]/best",
         "--max-filesize",
-        "500M",
+        "250M",
         "-o",
         outPath,
         cleanUrl,
       ],
-      { timeout: 90000, maxBuffer: 10 * 1024 * 1024 }
+      { timeout: 40000, maxBuffer: 10 * 1024 * 1024 }
     );
 
     if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 5000) {
@@ -714,36 +795,41 @@ app.post("/api/ingest-url", async (req, res) => {
   }
 });
 
-// Extract sampled JPEG frames + analyze visual scene sequence with Gemini Vision
+// Extract sampled JPEG frames in parallel + analyze visual scene sequence with Gemini Vision
 async function analyzeVideoKeyframes(localFile: string, duration: number): Promise<string> {
   const framePaths: string[] = [];
   try {
     const safeDur = Math.max(4, duration);
-    const frameCount = safeDur < 20 ? 3 : 6;
-    const parts: any[] = [];
+    const frameCount = safeDur < 20 ? 3 : 4;
+    const timestamps = Array.from({ length: frameCount }, (_, i) =>
+      Math.max(0.5, Math.min(safeDur - 0.5, ((i + 0.5) / frameCount) * safeDur))
+    );
 
-    for (let i = 0; i < frameCount; i++) {
-      const ts = Math.max(0.5, Math.min(safeDur - 0.5, ((i + 0.5) / frameCount) * safeDur));
-      const fPath = `/tmp/kf_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}.jpg`;
-      framePaths.push(fPath);
-      try {
-        await execFileAsync(
-          "ffmpeg",
-          ["-y", "-ss", ts.toFixed(1), "-i", localFile, "-vframes", "1", "-q:v", "6", "-vf", "scale=480:-2", fPath],
-          { timeout: 10000 }
-        );
-        if (fs.existsSync(fPath) && fs.statSync(fPath).size > 500) {
-          const mm = String(Math.floor(ts / 60)).padStart(2, "0");
-          const ss = String(Math.floor(ts % 60)).padStart(2, "0");
-          parts.push({ text: `Keyframe at [${mm}:${ss}]:` });
-          parts.push({
-            inlineData: {
-              mimeType: "image/jpeg",
-              data: fs.readFileSync(fPath).toString("base64"),
-            },
-          });
-        }
-      } catch {}
+    const extracted = await Promise.all(
+      timestamps.map(async (ts, i) => {
+        const fPath = `/tmp/kf_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}.jpg`;
+        framePaths.push(fPath);
+        try {
+          await execFileAsync(
+            "ffmpeg",
+            ["-y", "-ss", ts.toFixed(1), "-i", localFile, "-vframes", "1", "-q:v", "6", "-vf", "scale=480:-2", fPath],
+            { timeout: 10000 }
+          );
+          if (fs.existsSync(fPath) && fs.statSync(fPath).size > 500) {
+            return { ts, data: fs.readFileSync(fPath).toString("base64") };
+          }
+        } catch {}
+        return null;
+      })
+    );
+
+    const parts: any[] = [];
+    for (const item of extracted) {
+      if (!item) continue;
+      const mm = String(Math.floor(item.ts / 60)).padStart(2, "0");
+      const ss = String(Math.floor(item.ts % 60)).padStart(2, "0");
+      parts.push({ text: `Keyframe at [${mm}:${ss}]:` });
+      parts.push({ inlineData: { mimeType: "image/jpeg", data: item.data } });
     }
 
     if (parts.length < 2) return "";
@@ -752,13 +838,10 @@ async function analyzeVideoKeyframes(localFile: string, duration: number): Promi
     });
 
     const ai = getGeminiClient();
-    const res = await withGeminiRetry(() =>
-      ai.models.generateContent({
-        model: "gemini-4-hydrogen",
-        contents: { parts },
-        config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
-      })
-    );
+    const res = await generateContentResilient(ai, {
+      contents: { parts },
+      config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
+    });
     return (res.text || "").trim().slice(0, 4000);
   } catch (err: any) {
     console.warn("Visual keyframe analysis notice:", err?.message);
@@ -776,12 +859,18 @@ async function analyzeVideoKeyframes(localFile: string, duration: number): Promi
 app.post("/api/transcribe-video", async (req, res) => {
   const tempFiles: string[] = [];
   try {
-    const { videoUrl, playableSourceUrl, youtubeUrl } = req.body;
+    const {
+      videoUrl,
+      playableSourceUrl,
+      youtubeUrl,
+      youtubeDownloadBlocked = false,
+      skipAudio = false,
+    } = req.body;
 
     let localFile =
       resolveLocalVideoPath(playableSourceUrl) || resolveLocalVideoPath(videoUrl);
 
-    if (!localFile && youtubeUrl) {
+    if (!localFile && youtubeUrl && !youtubeDownloadBlocked) {
       const ytId = extractYoutubeId(youtubeUrl);
       if (ytId) {
         const cached = await ensureYoutubeCached(youtubeUrl, ytId);
@@ -809,15 +898,10 @@ app.post("/api/transcribe-video", async (req, res) => {
     let transcriptText = "";
     let noAudio = !meta.hasAudio;
 
-    if (meta.hasAudio) {
+    if (meta.hasAudio && !skipAudio) {
       const ai = getGeminiClient();
-      const aiBeta = new GoogleGenAI({
-        apiKey: process.env.GEMINI_API_KEY,
-        apiVersion: "v1beta",
-        httpOptions: { headers: { "User-Agent": "aistudio-build" } },
-      });
 
-      // Split longer videos into 600s chunks (up to 30 minutes = 3 chunks) so long videos aren't cut off
+      // Split longer videos into 600s chunks (up to 30 minutes = 3 chunks)
       const chunkLen = 600;
       const numChunks = Math.min(3, Math.max(1, Math.ceil(meta.duration / chunkLen)));
       const chunkTranscripts: string[] = [];
@@ -877,24 +961,31 @@ app.post("/api/transcribe-video", async (req, res) => {
 
         let response;
         try {
-          response = await withGeminiRetry(() =>
-            aiBeta.models.generateContent({
-              model: "gemini-3.5-transcribe",
-              contents: audioContents,
-            })
+          response = await withGeminiRetry(
+            () =>
+              withGeminiTimeout(
+                ai.models.generateContent({
+                  model: "gemini-3.5-transcribe",
+                  contents: audioContents,
+                }),
+                25000,
+                "gemini-3.5-transcribe"
+              ),
+            2
           );
         } catch (trErr: any) {
           const msg = String(trErr?.message || "");
-          if (Number(trErr?.status) === 404 || msg.includes("404") || msg.includes("NOT_FOUND")) {
-            response = await withGeminiRetry(() =>
-              ai.models.generateContent({
-                model: "gemini-4-hydrogen",
-                contents: audioContents,
-                config: {
-                  thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-                },
-              })
-            );
+          if (
+            Number(trErr?.status) === 404 ||
+            msg.includes("404") ||
+            msg.includes("NOT_FOUND") ||
+            isTransientGeminiError(trErr)
+          ) {
+            response = await generateContentResilient(ai, {
+              contents: audioContents,
+              timeoutMs: 25000,
+              config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
+            });
           } else {
             throw trErr;
           }
@@ -1027,103 +1118,90 @@ Extract ${desiredClipCount} clips and return strictly valid JSON matching the sc
 
     const ai = getGeminiClient();
 
-    const response = await withGeminiRetry(() =>
-      ai.models.generateContent({
-        model: "gemini-4-hydrogen",
-        contents: userPrompt,
-        config: {
-          systemInstruction: systemPrompt,
-          thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              summary: { type: Type.STRING, description: "Concise viral analysis of the source video" },
-              clips: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    id: { type: Type.STRING },
-                    title: { type: Type.STRING, description: "Scroll-stopping short title with 1-2 relevant emojis" },
-                    hook: { type: Type.STRING, description: "Punchy 3-second on-screen banner hook" },
-                    reason: { type: Type.STRING, description: "Specific explanation of why this moment hooks viewers" },
-                    category: {
-                      type: Type.STRING,
-                      description: "One of: funny, highlight, educational, debate",
-                    },
-                    startTime: { type: Type.NUMBER, description: `Start timestamp in seconds (0 to ${Math.max(0, totalSec - 5)})` },
-                    endTime: { type: Type.NUMBER, description: `End timestamp in seconds (strictly <= ${totalSec})` },
-                    viralityScore: { type: Type.INTEGER, description: "Overall virality score 75 to 99" },
-                    hookScore: { type: Type.INTEGER, description: "Opening 3s hook score 75 to 100" },
-                    flowScore: { type: Type.INTEGER, description: "Narrative pacing & payoff score 75 to 100" },
-                    emotionScore: { type: Type.INTEGER, description: "Emotional / comedic intensity score 75 to 100" },
-                    framingSuggestion: {
-                      type: Type.STRING,
-                      description: "Recommended 9:16 framing: smart_crop, blur_fit, split_screen, or clean_box",
-                    },
-                    panX: {
-                      type: Type.INTEGER,
-                      description: "Horizontal speaker/subject focus offset from -100 (far left) to +100 (far right), 0 center",
-                    },
-                    visualContext: {
-                      type: Type.STRING,
-                      description: "Brief visual scene description for this moment",
-                    },
-                    emojis: {
-                      type: Type.ARRAY,
-                      items: { type: Type.STRING },
-                    },
-                    hashtags: {
-                      type: Type.ARRAY,
-                      items: { type: Type.STRING },
-                    },
-                    recommendedMusicTempo: { type: Type.STRING },
-                    captions: {
-                      type: Type.ARRAY,
-                      items: {
-                        type: Type.OBJECT,
-                        properties: {
-                          start: { type: Type.NUMBER, description: "Relative seconds from clip start (0..clipDuration)" },
-                          end: { type: Type.NUMBER, description: "Relative seconds from clip start" },
-                          text: { type: Type.STRING },
-                          emphasisWord: { type: Type.STRING },
-                          words: {
-                            type: Type.ARRAY,
-                            items: {
-                              type: Type.OBJECT,
-                              properties: {
-                                w: { type: Type.STRING },
-                                start: { type: Type.NUMBER },
-                                end: { type: Type.NUMBER },
-                              },
-                            },
-                          },
-                        },
-                        required: ["start", "end", "text"],
+    const response = await generateContentResilient(ai, {
+      contents: userPrompt,
+      timeoutMs: 25000,
+      config: {
+        systemInstruction: systemPrompt,
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            summary: { type: Type.STRING, description: "Concise viral analysis of the source video" },
+            clips: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  id: { type: Type.STRING },
+                  title: { type: Type.STRING, description: "Scroll-stopping short title with 1-2 relevant emojis" },
+                  hook: { type: Type.STRING, description: "Punchy 3-second on-screen banner hook" },
+                  reason: { type: Type.STRING, description: "Specific explanation of why this moment hooks viewers" },
+                  category: {
+                    type: Type.STRING,
+                    description: "One of: funny, highlight, educational, debate",
+                  },
+                  startTime: { type: Type.NUMBER, description: `Start timestamp in seconds (0 to ${Math.max(0, totalSec - 5)})` },
+                  endTime: { type: Type.NUMBER, description: `End timestamp in seconds (strictly <= ${totalSec})` },
+                  viralityScore: { type: Type.INTEGER, description: "Overall virality score 75 to 99" },
+                  hookScore: { type: Type.INTEGER, description: "Opening 3s hook score 75 to 100" },
+                  flowScore: { type: Type.INTEGER, description: "Narrative pacing & payoff score 75 to 100" },
+                  emotionScore: { type: Type.INTEGER, description: "Emotional / comedic intensity score 75 to 100" },
+                  framingSuggestion: {
+                    type: Type.STRING,
+                    description: "Recommended 9:16 framing: smart_crop, blur_fit, split_screen, or clean_box",
+                  },
+                  panX: {
+                    type: Type.INTEGER,
+                    description: "Horizontal speaker/subject focus offset from -100 (far left) to +100 (far right), 0 center",
+                  },
+                  visualContext: {
+                    type: Type.STRING,
+                    description: "Brief visual scene description for this moment",
+                  },
+                  emojis: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                  hashtags: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                  },
+                  recommendedMusicTempo: { type: Type.STRING },
+                  captions: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        start: { type: Type.NUMBER, description: "Relative seconds from clip start (0..clipDuration)" },
+                        end: { type: Type.NUMBER, description: "Relative seconds from clip start" },
+                        text: { type: Type.STRING },
+                        emphasisWord: { type: Type.STRING },
                       },
+                      required: ["start", "end", "text"],
                     },
                   },
-                  required: [
-                    "id",
-                    "title",
-                    "hook",
-                    "reason",
-                    "category",
-                    "startTime",
-                    "endTime",
-                    "viralityScore",
-                    "hashtags",
-                    "captions",
-                  ],
                 },
+                required: [
+                  "id",
+                  "title",
+                  "hook",
+                  "reason",
+                  "category",
+                  "startTime",
+                  "endTime",
+                  "viralityScore",
+                  "hashtags",
+                  "captions",
+                ],
               },
             },
-            required: ["summary", "clips"],
           },
+          required: ["summary", "clips"],
         },
-      })
-    );
+      },
+    });
 
     const parsed = JSON.parse((response.text || "{}").trim());
     const rawClips = Array.isArray(parsed.clips) ? parsed.clips : [];
@@ -1249,32 +1327,29 @@ app.post("/api/ai-reframe", async (req, res) => {
 
     const imgBase64 = fs.readFileSync(framePath).toString("base64");
     const ai = getGeminiClient();
-    const response = await withGeminiRetry(() =>
-      ai.models.generateContent({
-        model: "gemini-4-hydrogen",
-        contents: {
-          parts: [
-            { inlineData: { mimeType: "image/jpeg", data: imgBase64 } },
-            {
-              text: "Analyze this video frame for vertical 9:16 mobile reframing. Identify where the main speaker, face, or focal action sits horizontally (-100 = far left edge, 0 = center, +100 = far right edge), recommend best framingMode ('smart_crop', 'blur_fit', 'split_screen', or 'clean_box'), and describe what is in frame.",
-            },
-          ],
-        },
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              panX: { type: Type.INTEGER },
-              recommendedFraming: { type: Type.STRING },
-              subjectDescription: { type: Type.STRING },
-            },
-            required: ["panX", "recommendedFraming", "subjectDescription"],
+    const response = await generateContentResilient(ai, {
+      contents: {
+        parts: [
+          { inlineData: { mimeType: "image/jpeg", data: imgBase64 } },
+          {
+            text: "Analyze this video frame for vertical 9:16 mobile reframing. Identify where the main speaker, face, or focal action sits horizontally (-100 = far left edge, 0 = center, +100 = far right edge), recommend best framingMode ('smart_crop', 'blur_fit', 'split_screen', or 'clean_box'), and describe what is in frame.",
           },
+        ],
+      },
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            panX: { type: Type.INTEGER },
+            recommendedFraming: { type: Type.STRING },
+            subjectDescription: { type: Type.STRING },
+          },
+          required: ["panX", "recommendedFraming", "subjectDescription"],
         },
-      })
-    );
+      },
+    });
 
     const parsed = JSON.parse((response.text || "{}").trim());
     const allowedFraming = new Set(["smart_crop", "split_screen", "blur_fit", "clean_box"]);
@@ -1305,53 +1380,59 @@ app.post("/api/generate-captions", async (req, res) => {
     }
 
     const ai = getGeminiClient();
-    const response = await withGeminiRetry(() =>
-      ai.models.generateContent({
-        model: "gemini-4-hydrogen",
-        contents: `Generate viral Hormozi/MrBeast style timed captions for this speech transcript of duration ${duration} seconds:
+    const response = await generateContentResilient(ai, {
+      contents: `Generate viral Hormozi/MrBeast style timed captions for this speech transcript of duration ${duration} seconds:
 """
 ${text}
 """
-Break into natural 3-5 word animated subtitle chunks. Calculate exact relative timestamps (start and end in seconds from 0 to ${duration}). Include word-level timestamps and identify one key high-impact emphasis word per chunk.`,
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              captions: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    start: { type: Type.NUMBER },
-                    end: { type: Type.NUMBER },
-                    text: { type: Type.STRING },
-                    emphasisWord: { type: Type.STRING },
-                    words: {
-                      type: Type.ARRAY,
-                      items: {
-                        type: Type.OBJECT,
-                        properties: {
-                          w: { type: Type.STRING },
-                          start: { type: Type.NUMBER },
-                          end: { type: Type.NUMBER },
-                        },
-                      },
-                    },
-                  },
-                  required: ["start", "end", "text"],
+Break into natural 3-5 word animated subtitle chunks. Calculate exact relative timestamps (start and end in seconds from 0 to ${duration}) and identify one key high-impact emphasis word per chunk.`,
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            captions: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  start: { type: Type.NUMBER },
+                  end: { type: Type.NUMBER },
+                  text: { type: Type.STRING },
+                  emphasisWord: { type: Type.STRING },
                 },
+                required: ["start", "end", "text"],
               },
             },
-            required: ["captions"],
           },
+          required: ["captions"],
         },
-      })
-    );
+      },
+    });
 
     const parsed = JSON.parse((response.text || "{}").trim());
-    return res.json(parsed);
+    const normalizedCaptions = (Array.isArray(parsed.captions) ? parsed.captions : []).map((cap: any, i: number) => {
+      const s = Math.max(0, Number(cap.start) || i * 2.5);
+      const e = Math.max(s + 0.5, Number(cap.end) || s + 2.5);
+      const txt = String(cap.text || "").trim();
+      const words = txt.split(/\s+/).filter(Boolean).map((w: string, wi: number, arr: string[]) => {
+        const seg = (e - s) / Math.max(1, arr.length);
+        return {
+          w,
+          start: Math.round((s + wi * seg) * 10) / 10,
+          end: Math.round((s + (wi + 1) * seg) * 10) / 10,
+        };
+      });
+      return {
+        start: Math.round(s * 10) / 10,
+        end: Math.round(e * 10) / 10,
+        text: txt,
+        emphasisWord: cap.emphasisWord || undefined,
+        words,
+      };
+    });
+    return res.json({ captions: normalizedCaptions });
   } catch (error: any) {
     console.error("Error generating captions:", error);
     const formatted = formatGeminiHttpError(error);
@@ -1367,10 +1448,8 @@ app.post("/api/suggest-hooks", async (req, res) => {
     const { clipTitle, quote, category } = req.body;
 
     const ai = getGeminiClient();
-    const response = await withGeminiRetry(() =>
-      ai.models.generateContent({
-        model: "gemini-4-hydrogen",
-        contents: `Create 5 ultra-engaging TikTok/Shorts opening hooks (max 10 words each) for this clip:
+    const response = await generateContentResilient(ai, {
+      contents: `Create 5 ultra-engaging TikTok/Shorts opening hooks (max 10 words each) for this clip:
 Title: "${clipTitle || "Viral Short"}"
 Key Quote / Current Hook: "${quote || ""}"
 Category: "${category || "highlight"}"
@@ -1381,30 +1460,29 @@ Provide 5 distinct psychological angles:
 3. Comedy / Meme
 4. Secret Knowledge
 5. Story Climax`,
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              hooks: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    angle: { type: Type.STRING },
-                    text: { type: Type.STRING },
-                    emoji: { type: Type.STRING },
-                  },
-                  required: ["angle", "text", "emoji"],
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            hooks: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  angle: { type: Type.STRING },
+                  text: { type: Type.STRING },
+                  emoji: { type: Type.STRING },
                 },
+                required: ["angle", "text", "emoji"],
               },
             },
-            required: ["hooks"],
           },
+          required: ["hooks"],
         },
-      })
-    );
+      },
+    });
 
     const parsed = JSON.parse((response.text || "{}").trim());
     return res.json(parsed);
@@ -1416,41 +1494,37 @@ Provide 5 distinct psychological angles:
 });
 
 // ---------------------------------------------------------------------------
-// 7. Gemini 4 Hydrogen — Platform Social Copy Pack (TikTok / Reels / Shorts)
+// 7. Gemini 4 Hydrogen — Platform Social Copy Pack (TikTok / Shorts)
 // ---------------------------------------------------------------------------
 app.post("/api/ai-social-pack", async (req, res) => {
   try {
     const { title, hook, reason, dialogue, hashtags = [] } = req.body;
     const ai = getGeminiClient();
 
-    const response = await withGeminiRetry(() =>
-      ai.models.generateContent({
-        model: "gemini-4-hydrogen",
-        contents: `Generate a ready-to-publish short-form social media copy pack for this clipped video segment.
+    const response = await generateContentResilient(ai, {
+      contents: `Generate a ready-to-publish short-form social media copy pack for this clipped video segment.
 Clip Title: "${title || ""}"
 Opening Hook: "${hook || ""}"
 Why Viral: "${reason || ""}"
 Dialogue Snippet: "${dialogue || ""}"
 Existing Tags: ${Array.isArray(hashtags) ? hashtags.join(" ") : ""}
 
-Return tailored titles, captions, pinned comment prompts, thumbnail cover text, and optimal hashtag sets for TikTok, Instagram Reels, and YouTube Shorts.`,
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              coverText: { type: Type.STRING, description: "3-5 punchy ALL-CAPS words for video cover frame" },
-              pinnedComment: { type: Type.STRING, description: "Question to pin in comments to boost engagement" },
-              tiktokCaption: { type: Type.STRING, description: "TikTok post description + hashtags" },
-              reelsCaption: { type: Type.STRING, description: "Instagram Reels caption + SEO hashtags" },
-              shortsTitle: { type: Type.STRING, description: "YouTube Shorts SEO title under 70 chars" },
-            },
-            required: ["coverText", "pinnedComment", "tiktokCaption", "reelsCaption", "shortsTitle"],
+Return tailored titles, captions, pinned comment prompts, thumbnail cover text, and optimal hashtag sets for TikTok and YouTube Shorts.`,
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            coverText: { type: Type.STRING, description: "3-5 punchy ALL-CAPS words for video cover frame" },
+            pinnedComment: { type: Type.STRING, description: "Question to pin in comments to boost engagement" },
+            tiktokCaption: { type: Type.STRING, description: "TikTok post description + hashtags" },
+            shortsTitle: { type: Type.STRING, description: "YouTube Shorts SEO title under 70 chars" },
           },
+          required: ["coverText", "pinnedComment", "tiktokCaption", "shortsTitle"],
         },
-      })
-    );
+      },
+    });
 
     const parsed = JSON.parse((response.text || "{}").trim());
     return res.json(parsed);
@@ -1511,27 +1585,24 @@ Give a concise 1-sentence colorist rationale.`,
     });
 
     const ai = getGeminiClient();
-    const response = await withGeminiRetry(() =>
-      ai.models.generateContent({
-        model: "gemini-4-hydrogen",
-        contents: { parts },
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              videoFilter: { type: Type.STRING },
-              filterBrightness: { type: Type.INTEGER },
-              filterContrast: { type: Type.INTEGER },
-              filterSaturate: { type: Type.INTEGER },
-              rationale: { type: Type.STRING },
-            },
-            required: ["videoFilter", "filterBrightness", "filterContrast", "filterSaturate", "rationale"],
+    const response = await generateContentResilient(ai, {
+      contents: { parts },
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            videoFilter: { type: Type.STRING },
+            filterBrightness: { type: Type.INTEGER },
+            filterContrast: { type: Type.INTEGER },
+            filterSaturate: { type: Type.INTEGER },
+            rationale: { type: Type.STRING },
           },
+          required: ["videoFilter", "filterBrightness", "filterContrast", "filterSaturate", "rationale"],
         },
-      })
-    );
+      },
+    });
 
     const parsed = JSON.parse((response.text || "{}").trim());
     const allowedPresets = new Set([
@@ -1575,10 +1646,8 @@ app.post("/api/ai-translate-captions", async (req, res) => {
     }
 
     const ai = getGeminiClient();
-    const response = await withGeminiRetry(() =>
-      ai.models.generateContent({
-        model: "gemini-4-hydrogen",
-        contents: `Transform these timed short-form video captions into "${targetLanguage}".
+    const response = await generateContentResilient(ai, {
+      contents: `Transform these timed short-form video captions into "${targetLanguage}".
 Keep the exact same array length (${captions.length}) and preserve start/end timestamps cleanly while making the text natural, punchy, and native for vertical short-form subtitles. Pick one impact emphasisWord per caption.
 
 Input Captions:
@@ -1589,31 +1658,30 @@ ${JSON.stringify(
     text: String(c.text || ""),
   }))
 )}`,
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              captions: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    start: { type: Type.NUMBER },
-                    end: { type: Type.NUMBER },
-                    text: { type: Type.STRING },
-                    emphasisWord: { type: Type.STRING },
-                  },
-                  required: ["start", "end", "text"],
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            captions: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  start: { type: Type.NUMBER },
+                  end: { type: Type.NUMBER },
+                  text: { type: Type.STRING },
+                  emphasisWord: { type: Type.STRING },
                 },
+                required: ["start", "end", "text"],
               },
             },
-            required: ["captions"],
           },
+          required: ["captions"],
         },
-      })
-    );
+      },
+    });
 
     const parsed = JSON.parse((response.text || "{}").trim());
     const outCaptions = (Array.isArray(parsed.captions) ? parsed.captions : []).map((cap: any, i: number) => {
@@ -1711,46 +1779,71 @@ Allowed enum values:
 If the user asks to clip new moments from the video, set triggerClipMorePrompt to a clear clipping instruction.`;
 
     const ai = getGeminiClient();
-    const chat = ai.chats.create({
-      model: "gemini-4-hydrogen",
-      history,
-      config: {
-        systemInstruction,
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-        responseMimeType: "application/json",
-        responseSchema: {
+    const directorSchema = {
+      type: Type.OBJECT,
+      properties: {
+        reply: { type: Type.STRING, description: "Helpful concise studio response explaining advice or changes made" },
+        actions: {
           type: Type.OBJECT,
+          description: "Optional Studio mutations to apply automatically",
           properties: {
-            reply: { type: Type.STRING, description: "Helpful concise studio response explaining advice or changes made" },
-            actions: {
-              type: Type.OBJECT,
-              description: "Optional Studio mutations to apply automatically",
-              properties: {
-                hookBannerText: { type: Type.STRING },
-                showHookBanner: { type: Type.BOOLEAN },
-                framingMode: { type: Type.STRING },
-                panX: { type: Type.INTEGER },
-                captionPreset: { type: Type.STRING },
-                captionColor: { type: Type.STRING },
-                captionEntranceAnim: { type: Type.STRING },
-                captionExitAnim: { type: Type.STRING },
-                videoFilter: { type: Type.STRING },
-                filterBrightness: { type: Type.INTEGER },
-                filterContrast: { type: Type.INTEGER },
-                filterSaturate: { type: Type.INTEGER },
-                startTime: { type: Type.NUMBER },
-                endTime: { type: Type.NUMBER },
-                newClipTitle: { type: Type.STRING },
-                triggerClipMorePrompt: { type: Type.STRING },
-              },
-            },
+            hookBannerText: { type: Type.STRING },
+            showHookBanner: { type: Type.BOOLEAN },
+            framingMode: { type: Type.STRING },
+            panX: { type: Type.INTEGER },
+            captionPreset: { type: Type.STRING },
+            captionColor: { type: Type.STRING },
+            captionEntranceAnim: { type: Type.STRING },
+            captionExitAnim: { type: Type.STRING },
+            videoFilter: { type: Type.STRING },
+            filterBrightness: { type: Type.INTEGER },
+            filterContrast: { type: Type.INTEGER },
+            filterSaturate: { type: Type.INTEGER },
+            startTime: { type: Type.NUMBER },
+            endTime: { type: Type.NUMBER },
+            newClipTitle: { type: Type.STRING },
+            triggerClipMorePrompt: { type: Type.STRING },
           },
-          required: ["reply"],
         },
       },
-    });
+      required: ["reply"],
+    };
 
-    const response = await withGeminiRetry(() => chat.sendMessage({ message: latestMsg }));
+    let response;
+    try {
+      const chat = ai.chats.create({
+        model: "gemini-4-hydrogen",
+        history,
+        config: {
+          systemInstruction,
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: "application/json",
+          responseSchema: directorSchema,
+        },
+      });
+      response = await withGeminiRetry(
+        () => withGeminiTimeout(chat.sendMessage({ message: latestMsg }), 18000, "gemini-4-hydrogen"),
+        2
+      );
+    } catch (dirErr: any) {
+      if (isTransientGeminiError(dirErr)) {
+        const fallbackChat = ai.chats.create({
+          model: "gemini-3.1-flash-lite",
+          history,
+          config: {
+            systemInstruction,
+            responseMimeType: "application/json",
+            responseSchema: directorSchema,
+          },
+        });
+        response = await withGeminiRetry(
+          () => withGeminiTimeout(fallbackChat.sendMessage({ message: latestMsg }), 18000, "gemini-3.1-flash-lite"),
+          2
+        );
+      } else {
+        throw dirErr;
+      }
+    }
     const parsed = JSON.parse((response.text || "{}").trim());
 
     return res.json({
@@ -1966,10 +2059,15 @@ async function clipVideoSegment(options: {
     captionDropShadow = true,
   } = options;
 
+  const startSec = Math.max(0, Math.floor(startTime));
+  const durSec = Math.max(3, Math.min(300, Math.ceil(duration)));
+  const endSec = startSec + durSec;
+  const safePan = Math.max(-100, Math.min(100, Math.round(Number(panX) || 0)));
+
   const safeClipId = clipId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 32);
   const cleanTitle = title.replace(/[^a-zA-Z0-9]/g, "_").toLowerCase().slice(0, 20) || "clip";
   const subTag = burnCaptions && Array.isArray(captions) && captions.length > 0 ? "_sub" : "";
-  const clipFilename = `${safeClipId}_${cleanTitle}_${resolution}_${framingMode}${subTag}.mp4`;
+  const clipFilename = `${safeClipId}_${cleanTitle}_s${startSec}_d${durSec}_p${safePan}_${resolution}_${framingMode}${subTag}.mp4`;
   const finalOut = path.join(clipsDir, clipFilename);
 
   if (!burnCaptions && fs.existsSync(finalOut) && fs.statSync(finalOut).size > 10000) {
@@ -1979,10 +2077,6 @@ async function clipVideoSegment(options: {
       duration: Math.round(duration),
     };
   }
-
-  const startSec = Math.max(0, Math.floor(startTime));
-  const durSec = Math.max(3, Math.min(300, Math.ceil(duration)));
-  const endSec = startSec + durSec;
 
   // Prefer locally accessible file (uploads, samples, or cached URL file)
   let localInput =
@@ -2023,7 +2117,7 @@ async function clipVideoSegment(options: {
           rawTemp,
           targetYt,
         ],
-        { timeout: 35000, maxBuffer: 10 * 1024 * 1024 }
+        { timeout: 20000, maxBuffer: 10 * 1024 * 1024 }
       );
     } catch (ytErr: any) {
       if (isYoutubeBotWallError(ytErr)) {
@@ -2100,7 +2194,7 @@ async function clipVideoSegment(options: {
     ffArgs.push("-movflags", "+faststart", finalOut);
 
     await execFileAsync("ffmpeg", ffArgs, {
-      timeout: 60000,
+      timeout: 25000,
       maxBuffer: 10 * 1024 * 1024,
     });
 
@@ -2151,13 +2245,14 @@ app.post("/api/auto-clip", async (req, res) => {
 
     const clippedResults: any[] = new Array(clips.length);
     const concurrency = 2;
+    const startedAt = Date.now();
     let cursor = 0;
     let botWallHit = false;
 
     const worker = async () => {
       while (cursor < clips.length) {
         const idx = cursor++;
-        if (botWallHit) {
+        if (botWallHit || Date.now() - startedAt > 38000) {
           clippedResults[idx] = { ...clips[idx] };
           continue;
         }
@@ -2279,6 +2374,496 @@ app.post("/api/clip-video", async (req, res) => {
     return res.status(500).json({ error: err.message || "Failed to clip video" });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Social Media Account OAuth & Channel/Post Lookup Routes
+// ---------------------------------------------------------------------------
+
+type SocialPlatformId = "shorts" | "tiktok";
+
+function isSocialPlatform(val: string): val is SocialPlatformId {
+  return val === "shorts" || val === "tiktok";
+}
+
+function getAppBaseUrl(): string {
+  const configured = (process.env.APP_URL || "").trim().replace(/\/+$/, "");
+  if (configured && /^https?:\/\//i.test(configured) && !configured.includes("MY_APP_URL")) {
+    return configured;
+  }
+  return `http://localhost:${PORT}`;
+}
+
+function signOAuthState(platform: SocialPlatformId): string {
+  const payload = JSON.stringify({
+    platform,
+    ts: Date.now(),
+    nonce: crypto.randomBytes(12).toString("hex"),
+  });
+  const encoded = Buffer.from(payload, "utf-8").toString("base64url");
+  const sig = crypto
+    .createHmac("sha256", OAUTH_STATE_SECRET)
+    .update(encoded)
+    .digest("base64url");
+  return `${encoded}.${sig}`;
+}
+
+function verifyOAuthState(
+  stateToken: string,
+  expectedPlatform: SocialPlatformId
+): boolean {
+  try {
+    const parts = stateToken.split(".");
+    if (parts.length !== 2) return false;
+    const [encoded, sig] = parts;
+    const expectedSig = crypto
+      .createHmac("sha256", OAUTH_STATE_SECRET)
+      .update(encoded)
+      .digest("base64url");
+    const sigBuf = Buffer.from(sig);
+    const expBuf = Buffer.from(expectedSig);
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+      return false;
+    }
+    const parsed = JSON.parse(Buffer.from(encoded, "base64url").toString("utf-8"));
+    if (parsed.platform !== expectedPlatform) return false;
+    if (typeof parsed.ts !== "number" || Date.now() - parsed.ts > 10 * 60 * 1000) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getSocialOAuthConfig(platform: SocialPlatformId) {
+  const baseUrl = getAppBaseUrl();
+  const redirectUri = `${baseUrl}/api/social/oauth/${platform}/callback`;
+
+  if (platform === "shorts") {
+    return {
+      clientId: (process.env.YOUTUBE_CLIENT_ID || "").trim(),
+      clientSecret: (process.env.YOUTUBE_CLIENT_SECRET || "").trim(),
+      redirectUri,
+      requiredEnvVars: ["YOUTUBE_CLIENT_ID", "YOUTUBE_CLIENT_SECRET"],
+      setupGuideUrl: "https://console.cloud.google.com/apis/credentials",
+    };
+  }
+  return {
+    clientId: (process.env.TIKTOK_CLIENT_KEY || "").trim(),
+    clientSecret: (process.env.TIKTOK_CLIENT_SECRET || "").trim(),
+    redirectUri,
+    requiredEnvVars: ["TIKTOK_CLIENT_KEY", "TIKTOK_CLIENT_SECRET"],
+    setupGuideUrl: "https://developers.tiktok.com/apps/",
+  };
+}
+
+function isAllowedSocialUrl(rawUrl: string, platform: SocialPlatformId): URL | null {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+    const host = parsed.hostname.toLowerCase();
+    if (
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "::1" ||
+      host.startsWith("10.") ||
+      host.startsWith("192.168.") ||
+      host.startsWith("169.254.") ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
+    ) {
+      return null;
+    }
+
+    const allowedHosts: Record<SocialPlatformId, string[]> = {
+      shorts: ["youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"],
+      tiktok: ["tiktok.com", "www.tiktok.com", "vm.tiktok.com", "m.tiktok.com"],
+    };
+
+    if (!allowedHosts[platform].includes(host)) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+app.get("/api/social/oauth/:platform/url", (req, res) => {
+  const platform = String(req.params.platform || "");
+  if (!isSocialPlatform(platform)) {
+    return res.status(400).json({ error: "Unsupported social platform" });
+  }
+
+  const cfg = getSocialOAuthConfig(platform);
+  if (!cfg.clientId || !cfg.clientSecret) {
+    return res.json({
+      configured: false,
+      platform,
+      redirectUri: cfg.redirectUri,
+      requiredEnvVars: cfg.requiredEnvVars,
+      setupGuideUrl: cfg.setupGuideUrl,
+    });
+  }
+
+  const state = signOAuthState(platform);
+  let url = "";
+
+  if (platform === "shorts") {
+    const params = new URLSearchParams({
+      client_id: cfg.clientId,
+      redirect_uri: cfg.redirectUri,
+      response_type: "code",
+      scope: "https://www.googleapis.com/auth/youtube.readonly",
+      access_type: "offline",
+      prompt: "consent",
+      state,
+    });
+    url = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+  } else {
+    const params = new URLSearchParams({
+      client_key: cfg.clientId,
+      redirect_uri: cfg.redirectUri,
+      response_type: "code",
+      scope: "user.info.basic,user.info.stats",
+      state,
+    });
+    url = `https://www.tiktok.com/v2/auth/authorize/?${params.toString()}`;
+  }
+
+  return res.json({
+    configured: true,
+    platform,
+    url,
+    redirectUri: cfg.redirectUri,
+  });
+});
+
+async function handleSocialOAuthCallback(req: express.Request, res: express.Response) {
+  const platform = String(req.params.platform || "");
+  const code = typeof req.query.code === "string" ? req.query.code : "";
+  const state = typeof req.query.state === "string" ? req.query.state : "";
+  const oauthError = typeof req.query.error === "string" ? req.query.error : "";
+
+  const sendPopupResult = (payload: Record<string, unknown>, isError = false) => {
+    const serialized = JSON.stringify(payload).replace(/</g, "\\u003c");
+    return res.status(isError ? 400 : 200).send(`<!doctype html>
+<html>
+  <head><meta charset="utf-8"><title>Social Account Connection</title></head>
+  <body style="font-family:system-ui,sans-serif;background:#09090b;color:#f4f4f5;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:24px;">
+    <div style="max-width:400px;text-align:center;">
+      <p style="font-size:14px;">${isError ? "Could not connect social account. You may close this window." : "Account connected! Returning to ClipForge..."}</p>
+    </div>
+    <script>
+      if (window.opener) {
+        window.opener.postMessage(${serialized}, "*");
+        window.close();
+      } else {
+        window.location.href = "/";
+      }
+    </script>
+  </body>
+</html>`);
+  };
+
+  if (!isSocialPlatform(platform)) {
+    return sendPopupResult({ type: "SOCIAL_OAUTH_ERROR", error: "Unsupported platform" }, true);
+  }
+  if (oauthError) {
+    return sendPopupResult({ type: "SOCIAL_OAUTH_ERROR", platform, error: oauthError }, true);
+  }
+  if (!code || !state || !verifyOAuthState(state, platform)) {
+    return sendPopupResult(
+      { type: "SOCIAL_OAUTH_ERROR", platform, error: "Invalid or expired OAuth state" },
+      true
+    );
+  }
+
+  const cfg = getSocialOAuthConfig(platform);
+  if (!cfg.clientId || !cfg.clientSecret) {
+    return sendPopupResult(
+      { type: "SOCIAL_OAUTH_ERROR", platform, error: "OAuth credentials not configured" },
+      true
+    );
+  }
+
+  try {
+    let profile: {
+      handle: string;
+      displayName: string;
+      profileUrl: string;
+      avatarUrl: string;
+      followersCount: number;
+      postsCount: number;
+    } = {
+      handle: "@creator",
+      displayName: "Connected Creator",
+      profileUrl: "",
+      avatarUrl: "",
+      followersCount: 0,
+      postsCount: 0,
+    };
+
+    if (platform === "shorts") {
+      const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          code,
+          client_id: cfg.clientId,
+          client_secret: cfg.clientSecret,
+          redirect_uri: cfg.redirectUri,
+          grant_type: "authorization_code",
+        }),
+      });
+      const tokenJson: any = await tokenRes.json();
+      if (!tokenRes.ok || !tokenJson.access_token) {
+        throw new Error(tokenJson.error_description || "YouTube OAuth token exchange failed");
+      }
+
+      const chRes = await fetch(
+        "https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&mine=true",
+        { headers: { Authorization: `Bearer ${tokenJson.access_token}` } }
+      );
+      const chJson: any = await chRes.json();
+      const channel = chJson?.items?.[0];
+      if (!channel) {
+        throw new Error("No YouTube channel found on this Google account");
+      }
+      const customHandle = channel.snippet?.customUrl || `@${channel.snippet?.title || "youtube"}`;
+      profile = {
+        handle: customHandle.startsWith("@") ? customHandle : `@${customHandle}`,
+        displayName: channel.snippet?.title || customHandle,
+        profileUrl: `https://www.youtube.com/channel/${channel.id}`,
+        avatarUrl: channel.snippet?.thumbnails?.default?.url || "",
+        followersCount: Number(channel.statistics?.subscriberCount) || 0,
+        postsCount: Number(channel.statistics?.videoCount) || 0,
+      };
+    } else {
+      const tokenRes = await fetch("https://open.tiktokapis.com/v2/oauth/token/", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_key: cfg.clientId,
+          client_secret: cfg.clientSecret,
+          code,
+          grant_type: "authorization_code",
+          redirect_uri: cfg.redirectUri,
+        }),
+      });
+      const tokenJson: any = await tokenRes.json();
+      const accessToken = tokenJson?.access_token || tokenJson?.data?.access_token;
+      if (!tokenRes.ok || !accessToken) {
+        throw new Error(tokenJson?.error_description || "TikTok OAuth token exchange failed");
+      }
+
+      const userRes = await fetch(
+        "https://open.tiktokapis.com/v2/user/info/?fields=open_id,display_name,avatar_url,username,follower_count,video_count",
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      const userJson: any = await userRes.json();
+      const u = userJson?.data?.user || {};
+      const uname = u.username || u.display_name || "tiktok_creator";
+      profile = {
+        handle: uname.startsWith("@") ? uname : `@${uname}`,
+        displayName: u.display_name || uname,
+        profileUrl: u.username ? `https://www.tiktok.com/@${u.username}` : "https://www.tiktok.com/",
+        avatarUrl: u.avatar_url || "",
+        followersCount: Number(u.follower_count) || 0,
+        postsCount: Number(u.video_count) || 0,
+      };
+    }
+
+    return sendPopupResult({
+      type: "SOCIAL_OAUTH_SUCCESS",
+      platform,
+      profile,
+    });
+  } catch (err: any) {
+    console.error("Social OAuth callback error:", err);
+    return sendPopupResult(
+      {
+        type: "SOCIAL_OAUTH_ERROR",
+        platform,
+        error: err?.message || "Failed to finish OAuth connection",
+      },
+      true
+    );
+  }
+}
+
+app.get(
+  ["/api/social/oauth/:platform/callback", "/api/social/oauth/:platform/callback/"],
+  handleSocialOAuthCallback
+);
+
+app.post("/api/social/lookup-channel", async (req, res) => {
+  try {
+    const platform = String(req.body?.platform || "");
+    const rawInput = String(req.body?.handleOrUrl || "").trim().slice(0, 240);
+
+    if (!isSocialPlatform(platform)) {
+      return res.status(400).json({ error: "Invalid social platform" });
+    }
+    if (!rawInput) {
+      return res.status(400).json({ error: "Please enter a @handle or profile URL" });
+    }
+
+    const extractHandleFromInput = (input: string, p: SocialPlatformId): string => {
+      if (/^https?:\/\//i.test(input)) {
+        const parsed = isAllowedSocialUrl(input, p);
+        if (!parsed) {
+          throw new Error(`URL must be a valid ${p} domain link.`);
+        }
+        const segments = parsed.pathname.split("/").filter(Boolean);
+        const rawSeg = segments[0] || "creator";
+        return rawSeg.startsWith("@") ? rawSeg : `@${rawSeg.replace(/^@/, "")}`;
+      }
+      const clean = input.replace(/^@+/, "").replace(/[^a-zA-Z0-9._-]/g, "");
+      if (!clean) {
+        throw new Error("Handle contains no valid characters.");
+      }
+      return `@${clean}`;
+    };
+
+    const normalizedHandle = extractHandleFromInput(rawInput, platform);
+    const bareHandle = normalizedHandle.replace(/^@/, "");
+
+    const defaultProfileUrl =
+      platform === "shorts"
+        ? `https://www.youtube.com/@${bareHandle}`
+        : `https://www.tiktok.com/@${bareHandle}`;
+
+    const profileUrl = /^https?:\/\//i.test(rawInput)
+      ? isAllowedSocialUrl(rawInput, platform)?.toString() || defaultProfileUrl
+      : defaultProfileUrl;
+
+    if (platform === "shorts") {
+      try {
+        const ytdlp = ensureYtdlpReady();
+        const { stdout } = await execFileAsync(
+          ytdlp,
+          [
+            "--dump-single-json",
+            "--no-warnings",
+            "--playlist-items",
+            "0",
+            profileUrl,
+          ],
+          { timeout: 15000, maxBuffer: 4 * 1024 * 1024 }
+        );
+        const info = JSON.parse(stdout || "{}");
+        const bestAvatar =
+          Array.isArray(info.thumbnails) && info.thumbnails.length > 0
+            ? info.thumbnails[info.thumbnails.length - 1]?.url || ""
+            : "";
+        return res.json({
+          success: true,
+          verifiedFromSource: true,
+          profile: {
+            handle: info.uploader_id
+              ? info.uploader_id.startsWith("@")
+                ? info.uploader_id
+                : `@${info.uploader_id}`
+              : normalizedHandle,
+            displayName: info.channel || info.uploader || info.title || bareHandle,
+            profileUrl: info.channel_url || info.webpage_url || profileUrl,
+            avatarUrl: typeof bestAvatar === "string" ? bestAvatar : "",
+            followersCount: Number(info.channel_follower_count) || 0,
+            postsCount: Number(info.playlist_count) || 0,
+          },
+        });
+      } catch {
+        // Fallback cleanly to normalized handle metadata when YouTube blocks cloud channel dump
+      }
+    }
+
+    return res.json({
+      success: true,
+      verifiedFromSource: false,
+      profile: {
+        handle: normalizedHandle,
+        displayName: bareHandle,
+        profileUrl,
+        avatarUrl: "",
+        followersCount: 0,
+        postsCount: 0,
+      },
+    });
+  } catch (err: any) {
+    return res.status(400).json({ error: err?.message || "Invalid account input" });
+  }
+});
+
+app.post("/api/social/lookup-post", async (req, res) => {
+  try {
+    const platform = String(req.body?.platform || "");
+    const rawUrl = String(req.body?.postUrl || "").trim().slice(0, 500);
+    if (!isSocialPlatform(platform)) {
+      return res.status(400).json({ error: "Invalid platform" });
+    }
+    const parsedUrl = isAllowedSocialUrl(rawUrl, platform);
+    if (!parsedUrl) {
+      return res.status(400).json({ error: "Please enter a valid YouTube or TikTok URL." });
+    }
+
+    const ytdlp = ensureYtdlpReady();
+    const { stdout } = await execFileAsync(
+      ytdlp,
+      ["--dump-single-json", "--skip-download", "--no-warnings", parsedUrl.toString()],
+      { timeout: 15000, maxBuffer: 4 * 1024 * 1024 }
+    );
+    const info = JSON.parse(stdout || "{}");
+    return res.json({
+      success: true,
+      metrics: {
+        title: typeof info.title === "string" ? info.title : "",
+        views: Math.max(0, Math.round(Number(info.view_count) || 0)),
+        likes: Math.max(0, Math.round(Number(info.like_count) || 0)),
+        comments: Math.max(0, Math.round(Number(info.comment_count) || 0)),
+        shares: Math.max(0, Math.round(Number(info.repost_count) || 0)),
+      },
+    });
+  } catch (err: any) {
+    return res.status(422).json({
+      error:
+        "Could not auto-fetch live post counts from that URL (platform may require OAuth or manual entry).",
+    });
+  }
+});
+
+// Ensure unmatched /api/* routes ALWAYS return JSON (never fall through to Vite/SPA HTML)
+app.use("/api", (req, res) => {
+  return res.status(404).json({
+    error: `API endpoint not found: ${req.method} ${req.originalUrl}`,
+    code: "API_NOT_FOUND",
+  });
+});
+
+// Express JSON error middleware (handles multer, express.json, or unhandled route errors)
+app.use(
+  (
+    err: any,
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction
+  ) => {
+    if (res.headersSent) return next(err);
+    const isLimitErr = err?.code === "LIMIT_FILE_SIZE" || err?.type === "entity.too.large";
+    const status = isLimitErr
+      ? 413
+      : Number(err?.status || err?.statusCode) || 500;
+    const message = isLimitErr
+      ? "Uploaded video or payload exceeds the server limit."
+      : err?.message || "Internal server error";
+    if (req.originalUrl.startsWith("/api")) {
+      return res.status(status).json({
+        error: message,
+        code: err?.code || "SERVER_ERROR",
+      });
+    }
+    return res.status(status).send(message);
+  }
+);
 
 // Setup Vite middleware in dev or static files in production
 async function startServer() {

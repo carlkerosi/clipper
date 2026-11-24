@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Palette, RotateCcw, Check, Sun, Contrast, Droplets, Sparkles, Loader2, AlertCircle } from 'lucide-react';
 import { ExportSettings, VideoFilterPreset } from '../types';
 import { VIDEO_FILTER_PRESETS, getCssFilterString } from '../utils/videoFilters';
+import { parseJsonResponse } from '../utils/safeFetchJson';
 
 interface VideoEffectsPanelProps {
   settings: ExportSettings;
@@ -65,7 +66,7 @@ export const VideoEffectsPanel: React.FC<VideoEffectsPanelProps> = ({
           hook: clipHook,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponse(res, 'AI color grading failed');
       if (!res.ok) {
         throw new Error(data.error || 'AI color grading failed.');
       }

@@ -150,3 +150,66 @@ export interface ExportSettings {
   filterContrast?: number;
   filterSaturate?: number;
 }
+
+export type SocialPlatform = 'shorts' | 'tiktok';
+
+export type AccountConnectionType = 'oauth' | 'linked';
+
+export interface SocialAccount {
+  id: string;
+  userId: string;
+  platform: SocialPlatform;
+  handle: string;
+  displayName: string;
+  profileUrl: string;
+  avatarUrl: string;
+  connectionType: AccountConnectionType;
+  isDefault: boolean;
+  followersCount: number;
+  postsCount: number;
+  notes: string;
+  lastSyncedAt: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export type ClipPublishStatus = 'exported' | 'scheduled' | 'published';
+
+export interface PublishedClipRecord {
+  id: string;
+  userId: string;
+  accountId: string;
+  accountHandle: string;
+  platform: SocialPlatform;
+  clipId: string;
+  clipTitle: string;
+  sourceVideoTitle: string;
+  filename: string;
+  captionCopy: string;
+  status: ClipPublishStatus;
+  postUrl: string;
+  scheduledFor: string;
+  views: number;
+  likes: number;
+  comments: number;
+  shares: number;
+  durationSec: number;
+  viralityScore: number;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface WorkspacePreferences {
+  id: string;
+  userId: string;
+  autoApplyAccounts: boolean;
+  autoApplyAiFraming: boolean;
+  autoApplyStyleAcrossClips: boolean;
+  autoSyncStatsOnOpen: boolean;
+  captionPreset: CaptionPreset;
+  captionColor: string;
+  captionHighlightStyle: CaptionHighlightStyle;
+  videoFilter: VideoFilterPreset;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}

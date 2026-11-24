@@ -15,6 +15,8 @@ import {
   Share2,
   X,
   Youtube,
+  Music2,
+  ExternalLink,
   ArrowUpDown,
   Highlighter,
   Hash,
@@ -28,6 +30,14 @@ import {
 } from '../types';
 import { generateSrtFile, downloadBlob } from '../utils/exportVideo';
 import { formatCaptionCase } from '../utils/captionRenderer';
+import {
+  ExportPlatform,
+  PLATFORM_PRESETS,
+  buildPlatformSocialCopy,
+  renderServerClipForPlatform,
+} from '../utils/platformExport';
+import { useFirebase } from '../contexts/FirebaseContext';
+import { parseJsonResponse } from '../utils/safeFetchJson';
 
 function extractYoutubeVideoId(url?: string): string {
   if (!url) return '';
@@ -41,8 +51,9 @@ interface OpusClipFeedProps {
   settings: ExportSettings;
   onUpdateSettings: (newSettings: Partial<ExportSettings>) => void;
   onSelectClipToEdit: (clip: ClipHighlight) => void;
-  onOpenExportModal: (clip: ClipHighlight) => void;
+  onOpenExportModal: (clip: ClipHighlight, platform?: ExportPlatform) => void;
   onNewVideo: () => void;
+  onOpenDashboard?: () => void;
   onClipUpdated?: (updatedClip: ClipHighlight) => void;
   isAiGenerating?: boolean;
   onGenerateMoreClips?: (customPrompt: string, clipCount: number) => void;
@@ -52,7 +63,6 @@ interface SocialPack {
   coverText: string;
   pinnedComment: string;
   tiktokCaption: string;
-  reelsCaption: string;
   shortsTitle: string;
 }
 
@@ -64,10 +74,12 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
   onSelectClipToEdit,
   onOpenExportModal,
   onNewVideo,
+  onOpenDashboard,
   onClipUpdated,
   isAiGenerating = false,
   onGenerateMoreClips,
 }) => {
+  const { getDefaultAccountForPlatform, logClipExport, workspacePrefs } = useFirebase();
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [sortBy, setSortBy] = useState<'score' | 'timeline'>('score');
   const [morePrompt, setMorePrompt] = useState('');
@@ -78,6 +90,13 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
   const [playheadMap, setPlayheadMap] = useState<Record<string, number>>({});
   const [isMuted, setIsMuted] = useState(false);
   const [downloadingClipId, setDownloadingClipId] = useState<string | null>(null);
+  const [quickExporting, setQuickExporting] = useState<{
+    clipId: string;
+    platform: ExportPlatform;
+  } | null>(null);
+  const [quickExportDone, setQuickExportDone] = useState<
+    Record<string, { platform: ExportPlatform; filename: string; captionCopied: boolean }>
+  >({});
   const [reclippingId, setReclippingId] = useState<string | null>(null);
   const [videoErrors, setVideoErrors] = useState<Record<string, string>>({});
 
@@ -275,11 +294,12 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
           duration: clipDur,
           resolution: '720p',
           framingMode: clip.framingSuggestion || settings.framingMode || 'smart_crop',
+          panX: typeof clip.panX === 'number' ? clip.panX : settings.panX,
           title: clip.title,
           clipId: `${clip.id}_${Date.now()}`,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponse(res, 'Clip render failed');
       if (!res.ok || !data.downloadUrl) {
         throw new Error(data.error || 'Clip render failed');
       }
@@ -336,7 +356,7 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
         }),
       });
 
-      const data = await res.json();
+      const data = await parseJsonResponse(res, 'Server clip render failed');
       if (!res.ok || !data.downloadUrl) {
         throw new Error(data.error || 'Server clip render failed');
       }
@@ -360,6 +380,65 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
     }
   };
 
+  const handleQuickExportPlatform = async (clip: ClipHighlight, platform: ExportPlatform) => {
+    if (!getClipVideoSource(clip) && ytId) {
+      onOpenExportModal(clip, platform);
+      return;
+    }
+
+    const targetAccount = workspacePrefs.autoApplyAccounts
+      ? getDefaultAccountForPlatform(platform)
+      : undefined;
+
+    setQuickExporting({ clipId: clip.id, platform });
+    try {
+      const result = await renderServerClipForPlatform({
+        clip,
+        videoSource,
+        settings,
+        platform,
+        account: targetAccount,
+        autoApplyAiFraming: workspacePrefs.autoApplyAiFraming,
+      });
+
+      if (onClipUpdated) {
+        onClipUpdated({
+          ...clip,
+          clipVideoUrl: result.downloadUrl,
+          downloadUrl: result.downloadUrl,
+        });
+      }
+
+      setQuickExportDone((prev) => ({
+        ...prev,
+        [clip.id]: {
+          platform,
+          filename: result.filename,
+          captionCopied: result.captionCopied,
+        },
+      }));
+
+      logClipExport({
+        platform,
+        clipId: clip.id,
+        clipTitle: clip.title,
+        sourceVideoTitle: videoSource.title,
+        filename: result.filename,
+        captionCopy: buildPlatformSocialCopy(clip, platform, targetAccount),
+        durationSec: Math.max(1, Math.round(clip.endTime - clip.startTime)),
+        viralityScore: clip.viralityScore,
+        status: 'exported',
+        accountId: targetAccount?.id,
+        accountHandle: targetAccount?.handle,
+      }).catch(() => {});
+    } catch (err) {
+      console.warn('Quick platform export fallback to modal:', err);
+      onOpenExportModal(clip, platform);
+    } finally {
+      setQuickExporting(null);
+    }
+  };
+
   const handleOpenSocialPack = async (clip: ClipHighlight) => {
     setSocialModalClip(clip);
     setSocialPack(null);
@@ -379,7 +458,7 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
           hashtags: clip.hashtags,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponse(res, 'Failed to generate AI social copy');
       if (!res.ok) {
         throw new Error(data.error || 'Failed to generate AI social copy');
       }
@@ -392,7 +471,7 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
   };
 
   const handleCopyDescription = (clip: ClipHighlight) => {
-    const text = `${clip.title}\n\n${clip.reason}\n\n"${clip.hook}"\n\n${clip.hashtags.join(' ')} #shorts #reels #tiktok`;
+    const text = `${clip.title}\n\n${clip.reason}\n\n"${clip.hook}"\n\n${clip.hashtags.join(' ')} #shorts #tiktok`;
     navigator.clipboard.writeText(text);
     setCopiedId(clip.id);
     setTimeout(() => setCopiedId(null), 2000);
@@ -1101,69 +1180,145 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
                 </div>
 
                 {/* Action Footer */}
-                <div className="pt-3 border-t border-zinc-800 flex flex-wrap items-center justify-between gap-2.5">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      onClick={() => onSelectClipToEdit(clip)}
-                      className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-semibold transition-colors cursor-pointer"
-                    >
-                      <Sliders className="w-3.5 h-3.5" />
-                      <span>Edit in Studio</span>
-                    </button>
+                <div className="pt-3 border-t border-zinc-800 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        onClick={() => onSelectClipToEdit(clip)}
+                        className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-semibold transition-colors cursor-pointer"
+                      >
+                        <Sliders className="w-3.5 h-3.5" />
+                        <span>Edit in Studio</span>
+                      </button>
 
-                    <button
-                      onClick={() => handleDirectDownload(clip)}
-                      disabled={downloadingClipId === clip.id}
-                      className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-xs font-medium border border-zinc-700 transition-colors cursor-pointer disabled:opacity-50"
-                    >
-                      {downloadingClipId === clip.id ? (
-                        <>
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          <span>Exporting...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Download className="w-3.5 h-3.5" />
-                          <span>Download MP4</span>
-                        </>
-                      )}
-                    </button>
+                      <button
+                        onClick={() => handleDirectDownload(clip)}
+                        disabled={downloadingClipId === clip.id || quickExporting?.clipId === clip.id}
+                        className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-xs font-medium border border-zinc-700 transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        {downloadingClipId === clip.id ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            <span>Exporting...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Download className="w-3.5 h-3.5" />
+                            <span>Download MP4</span>
+                          </>
+                        )}
+                      </button>
+
+                      {/* 1-Click Platform Export Shortcuts */}
+                      <div className="flex items-center gap-1 pl-1 border-l border-zinc-800">
+                        <span className="text-[10px] font-mono uppercase tracking-wider text-zinc-500 mr-0.5 hidden sm:inline">
+                          Quick:
+                        </span>
+                        {(
+                          [
+                            { id: 'shorts', Icon: Youtube, color: 'text-red-400' },
+                            { id: 'tiktok', Icon: Music2, color: 'text-cyan-400' },
+                          ] as const
+                        ).map(({ id, Icon, color }) => {
+                          const preset = PLATFORM_PRESETS[id];
+                          const isThisExporting =
+                            quickExporting?.clipId === clip.id && quickExporting.platform === id;
+                          return (
+                            <button
+                              key={id}
+                              onClick={() => handleQuickExportPlatform(clip, id)}
+                              disabled={
+                                downloadingClipId === clip.id || quickExporting?.clipId === clip.id
+                              }
+                              title={`Quick export for ${preset.label} (${preset.tag}) & copy caption`}
+                              className="flex items-center gap-1 px-2.5 py-2 rounded-lg bg-zinc-950 hover:bg-zinc-800 text-zinc-200 text-[11px] font-medium border border-zinc-800 hover:border-zinc-700 transition-colors cursor-pointer disabled:opacity-50"
+                            >
+                              {isThisExporting ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+                              ) : (
+                                <Icon className={`w-3.5 h-3.5 ${color}`} />
+                              )}
+                              <span>{preset.shortLabel}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-3 text-xs text-zinc-400">
+                      <button
+                        onClick={() => handleOpenSocialPack(clip)}
+                        className="flex items-center gap-1 text-violet-400 hover:text-violet-300 font-medium transition-colors cursor-pointer"
+                      >
+                        <Share2 className="w-3.5 h-3.5" />
+                        <span>AI Social Copy</span>
+                      </button>
+
+                      <button
+                        onClick={() => handleCopyDescription(clip)}
+                        className="flex items-center gap-1 hover:text-zinc-200 transition-colors cursor-pointer"
+                      >
+                        {copiedId === clip.id ? (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-emerald-400" />
+                            <span className="text-emerald-400 font-medium">Copied</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>Copy Description</span>
+                          </>
+                        )}
+                      </button>
+
+                      <button
+                        onClick={() => handleDownloadSrt(clip)}
+                        className="flex items-center gap-1 hover:text-zinc-200 transition-colors cursor-pointer"
+                      >
+                        <FileText className="w-3.5 h-3.5" />
+                        <span>.SRT</span>
+                      </button>
+                    </div>
                   </div>
 
-                  <div className="flex items-center gap-3 text-xs text-zinc-400">
-                    <button
-                      onClick={() => handleOpenSocialPack(clip)}
-                      className="flex items-center gap-1 text-violet-400 hover:text-violet-300 font-medium transition-colors cursor-pointer"
-                    >
-                      <Share2 className="w-3.5 h-3.5" />
-                      <span>AI Social Copy</span>
-                    </button>
-
-                    <button
-                      onClick={() => handleCopyDescription(clip)}
-                      className="flex items-center gap-1 hover:text-zinc-200 transition-colors cursor-pointer"
-                    >
-                      {copiedId === clip.id ? (
-                        <>
-                          <Check className="w-3.5 h-3.5 text-emerald-400" />
-                          <span className="text-emerald-400 font-medium">Copied</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="w-3.5 h-3.5" />
-                          <span>Copy Description</span>
-                        </>
-                      )}
-                    </button>
-
-                    <button
-                      onClick={() => handleDownloadSrt(clip)}
-                      className="flex items-center gap-1 hover:text-zinc-200 transition-colors cursor-pointer"
-                    >
-                      <FileText className="w-3.5 h-3.5" />
-                      <span>.SRT</span>
-                    </button>
-                  </div>
+                  {quickExportDone[clip.id] && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/25 text-[11px]">
+                      <div className="flex items-center gap-1.5 text-emerald-300 min-w-0">
+                        <Check className="w-3.5 h-3.5 shrink-0" />
+                        <span className="truncate">
+                          Exported{' '}
+                          <span className="font-mono text-emerald-200">
+                            {quickExportDone[clip.id].filename}
+                          </span>
+                          {workspacePrefs.autoApplyAccounts &&
+                          getDefaultAccountForPlatform(quickExportDone[clip.id].platform)
+                            ? ` for ${getDefaultAccountForPlatform(quickExportDone[clip.id].platform)?.handle}`
+                            : ''}
+                          {quickExportDone[clip.id].captionCopied ? ' · Caption & hashtags copied' : ''}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-3 shrink-0">
+                        {onOpenDashboard && (
+                          <button
+                            type="button"
+                            onClick={onOpenDashboard}
+                            className="text-zinc-300 hover:text-white underline underline-offset-2 cursor-pointer"
+                          >
+                            Monitor in Dashboard
+                          </button>
+                        )}
+                        <a
+                          href={PLATFORM_PRESETS[quickExportDone[clip.id].platform].uploadUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-1 font-semibold text-emerald-300 hover:text-emerald-200 underline underline-offset-2 shrink-0"
+                        >
+                          <span>{PLATFORM_PRESETS[quickExportDone[clip.id].platform].uploadCta}</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             </article>
@@ -1195,7 +1350,7 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
               {isGeneratingSocial ? (
                 <div className="py-10 flex flex-col items-center justify-center gap-3 text-xs text-zinc-400">
                   <Loader2 className="w-6 h-6 animate-spin text-violet-400" />
-                  <span>Gemini writing TikTok, Reels & Shorts copy...</span>
+                  <span>Gemini writing TikTok & Shorts copy...</span>
                 </div>
               ) : socialError ? (
                 <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300 space-y-2">
@@ -1213,7 +1368,6 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
                     { key: 'cover', label: 'Thumbnail Cover Text', val: socialPack.coverText },
                     { key: 'shorts', label: 'YouTube Shorts Title', val: socialPack.shortsTitle },
                     { key: 'tiktok', label: 'TikTok Post Caption', val: socialPack.tiktokCaption },
-                    { key: 'reels', label: 'Instagram Reels Caption', val: socialPack.reelsCaption },
                     { key: 'comment', label: 'Engagement Pinned Comment', val: socialPack.pinnedComment },
                   ].map((item) => (
                     <div key={item.key} className="p-3 rounded-xl bg-zinc-950 border border-zinc-800 space-y-1.5">

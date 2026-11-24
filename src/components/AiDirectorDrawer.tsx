@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { X, Sparkles, Send, Loader2, Wand2, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { ClipHighlight, ExportSettings, VideoSource } from '../types';
+import { parseJsonResponse } from '../utils/safeFetchJson';
 
 export interface DirectorActions {
   hookBannerText?: string;
@@ -91,7 +92,7 @@ export const AiDirectorDrawer: React.FC<AiDirectorDrawerProps> = ({
         }),
       });
 
-      const data = await res.json();
+      const data = await parseJsonResponse(res, 'AI Director request failed');
       if (!res.ok) {
         throw new Error(data.error || 'AI Director request failed.');
       }

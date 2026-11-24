@@ -14,6 +14,7 @@ import {
 import { ClipHighlight, ExportSettings, FramingMode } from '../types';
 import { drawVerticalFrame } from '../utils/captionRenderer';
 import { getCssFilterString } from '../utils/videoFilters';
+import { parseJsonResponse } from '../utils/safeFetchJson';
 
 function extractYoutubeVideoId(url?: string): string {
   if (!url) return '';
@@ -332,7 +333,7 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
           timestamp: targetTs,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponse(res, 'AI Auto-Reframe failed');
       if (!res.ok) {
         throw new Error(data.error || 'AI Auto-Reframe failed');
       }

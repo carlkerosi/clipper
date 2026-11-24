@@ -1,14 +1,31 @@
-import React from 'react';
-import { Scissors, Sparkles, Upload, Download, Grid, Sliders, Plus, Film } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import {
+  Scissors,
+  Sparkles,
+  Upload,
+  Download,
+  Grid,
+  Sliders,
+  Plus,
+  Film,
+  ChevronDown,
+  Youtube,
+  Music2,
+  Zap,
+  BarChart3,
+} from 'lucide-react';
 import { VideoSource, ClipHighlight } from '../types';
+import { ExportPlatform, PLATFORM_PRESETS } from '../utils/platformExport';
+import { useFirebase } from '../contexts/FirebaseContext';
 
 interface HeaderProps {
   currentVideo: VideoSource;
   activeClip: ClipHighlight | null;
-  appMode: 'generator' | 'feed' | 'studio';
-  onSetAppMode: (mode: 'generator' | 'feed' | 'studio') => void;
+  appMode: 'generator' | 'feed' | 'studio' | 'dashboard';
+  onSetAppMode: (mode: 'generator' | 'feed' | 'studio' | 'dashboard') => void;
   onOpenImportModal: () => void;
   onOpenExportModal: () => void;
+  onQuickExportPlatform?: (platform: ExportPlatform) => void;
   onOpenAiDirector?: () => void;
 }
 
@@ -19,8 +36,29 @@ export const Header: React.FC<HeaderProps> = ({
   onSetAppMode,
   onOpenImportModal,
   onOpenExportModal,
+  onQuickExportPlatform,
   onOpenAiDirector,
 }) => {
+  const { socialAccounts, getDefaultAccountForPlatform } = useFirebase();
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!isExportMenuOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setIsExportMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isExportMenuOpen]);
+
+  const platformIcons: Record<ExportPlatform, React.ReactNode> = {
+    shorts: <Youtube className="w-4 h-4 text-red-500 shrink-0" />,
+    tiktok: <Music2 className="w-4 h-4 text-cyan-400 shrink-0" />,
+  };
+
   return (
     <header className="border-b border-zinc-800/80 bg-zinc-950/95 backdrop-blur-md sticky top-0 z-40 px-4 lg:px-8 py-3">
       <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
@@ -98,6 +136,23 @@ export const Header: React.FC<HeaderProps> = ({
             <Sliders className="w-3.5 h-3.5" />
             <span>Studio 9:16</span>
           </button>
+
+          <button
+            onClick={() => onSetAppMode('dashboard')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+              appMode === 'dashboard'
+                ? 'bg-zinc-800 text-white font-semibold'
+                : 'text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            <BarChart3 className="w-3.5 h-3.5" />
+            <span>Dashboard</span>
+            {socialAccounts.length > 0 && (
+              <span className="text-[11px] font-mono tabular-nums text-emerald-400">
+                {socialAccounts.length}
+              </span>
+            )}
+          </button>
         </nav>
 
         {/* Zone 3: Actions */}
@@ -121,14 +176,95 @@ export const Header: React.FC<HeaderProps> = ({
             <span>Import</span>
           </button>
 
-          <button
-            onClick={onOpenExportModal}
-            disabled={!activeClip}
-            className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap shrink-0"
-          >
-            <Download className="w-3.5 h-3.5 stroke-[2.2]" />
-            <span>Export 9:16</span>
-          </button>
+          {/* Split Export 9:16 + Platform Shortcuts Dropdown */}
+          <div ref={menuRef} className="relative flex items-center">
+            <button
+              onClick={onOpenExportModal}
+              disabled={!activeClip}
+              className={`flex items-center gap-1.5 pl-3.5 pr-2.5 py-1.5 text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-zinc-950 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap shrink-0 ${
+                onQuickExportPlatform ? 'rounded-l-lg border-r border-emerald-600/40' : 'rounded-lg pr-3.5'
+              }`}
+            >
+              <Download className="w-3.5 h-3.5 stroke-[2.2]" />
+              <span>Export 9:16</span>
+            </button>
+
+            {onQuickExportPlatform && (
+              <button
+                type="button"
+                onClick={() => setIsExportMenuOpen((prev) => !prev)}
+                disabled={!activeClip}
+                aria-label="Platform Export Shortcuts"
+                title="One-click export to YouTube Shorts or TikTok"
+                className="px-2 py-1.5 rounded-r-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center"
+              >
+                <ChevronDown className="w-3.5 h-3.5 stroke-[2.5]" />
+              </button>
+            )}
+
+            {isExportMenuOpen && onQuickExportPlatform && (
+              <div className="absolute right-0 top-full mt-2 w-64 rounded-xl bg-zinc-900 border border-zinc-800 shadow-2xl p-1.5 z-50">
+                <div className="px-2.5 py-1.5 flex items-center gap-1.5 text-[10px] font-mono uppercase tracking-wider text-zinc-400 border-b border-zinc-800 mb-1">
+                  <Zap className="w-3 h-3 text-emerald-400" />
+                  <span>Quick Export Shortcut</span>
+                </div>
+
+                {(['shorts', 'tiktok'] as ExportPlatform[]).map((platformId) => {
+                  const preset = PLATFORM_PRESETS[platformId];
+                  const linkedAcc = getDefaultAccountForPlatform(platformId);
+                  return (
+                    <button
+                      key={platformId}
+                      type="button"
+                      onClick={() => {
+                        setIsExportMenuOpen(false);
+                        onQuickExportPlatform(platformId);
+                      }}
+                      className="w-full px-2.5 py-2 rounded-lg hover:bg-zinc-800 flex items-center justify-between gap-2 text-left transition-colors cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        {platformIcons[platformId]}
+                        <div className="min-w-0">
+                          <div className="text-xs font-semibold text-zinc-100 truncate">
+                            {preset.label}
+                          </div>
+                          <div className="text-[10px] text-zinc-500 font-mono truncate">
+                            {linkedAcc ? linkedAcc.handle : preset.tag}
+                          </div>
+                        </div>
+                      </div>
+                      <kbd className="px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-700 text-[10px] font-mono text-zinc-400 shrink-0">
+                        {preset.shortcut}
+                      </kbd>
+                    </button>
+                  );
+                })}
+
+                <div className="mt-1 pt-1 border-t border-zinc-800 space-y-0.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsExportMenuOpen(false);
+                      onOpenExportModal();
+                    }}
+                    className="w-full px-2.5 py-1.5 rounded-lg hover:bg-zinc-800 text-xs text-zinc-300 text-left transition-colors cursor-pointer"
+                  >
+                    Custom Export Options...
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsExportMenuOpen(false);
+                      onSetAppMode('dashboard');
+                    }}
+                    className="w-full px-2.5 py-1.5 rounded-lg hover:bg-zinc-800 text-xs text-emerald-400 text-left transition-colors cursor-pointer"
+                  >
+                    Manage Social Accounts & Monitor...
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </header>

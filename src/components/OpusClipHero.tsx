@@ -23,6 +23,7 @@ import {
 import { SAMPLE_VIDEOS } from '../data/sampleVideos';
 import { VideoSource, ClipGenerationOptions } from '../types';
 import thumbNeuro from '../assets/images/thumb_neuro_lab_1795100814397.jpg';
+import { parseJsonResponse } from '../utils/safeFetchJson';
 
 interface OpusClipHeroProps {
   onGenerateClips: (options: ClipGenerationOptions) => void;
@@ -83,7 +84,7 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
         body: formData,
       });
 
-      const data = await uploadRes.json();
+      const data = await parseJsonResponse(uploadRes, 'Video upload failed');
       if (!uploadRes.ok || !data.playableSourceUrl) {
         throw new Error(data.error || 'Video upload failed');
       }
@@ -116,7 +117,10 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
     setUploadError(null);
 
     let targetVideo: VideoSource;
-    const trimmedUrl = urlInput.trim();
+    let trimmedUrl = urlInput.trim();
+    if (trimmedUrl && !/^https?:\/\//i.test(trimmedUrl) && trimmedUrl.includes('.')) {
+      trimmedUrl = `https://${trimmedUrl}`;
+    }
 
     const matchedSample = SAMPLE_VIDEOS.find(
       (s) => s.youtubeUrl === trimmedUrl || (trimmedUrl && s.id.includes(trimmedUrl.toLowerCase()))
@@ -282,7 +286,7 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
           </span>
         </h1>
         <p className="text-sm sm:text-base text-zinc-400 max-w-xl mx-auto leading-relaxed">
-          AI detects punchlines, emotional hooks, and top moments. Automatically crops to 9:16 with animated kinetic captions for TikTok, Reels & Shorts.
+          AI detects punchlines, emotional hooks, and top moments. Automatically crops to 9:16 with animated kinetic captions for TikTok & YouTube Shorts.
         </p>
       </div>
 
@@ -327,7 +331,8 @@ export const OpusClipHero: React.FC<OpusClipHeroProps> = ({
                 <Youtube className="w-5 h-5 text-red-500" />
               </div>
               <input
-                type="url"
+                type="text"
+                inputMode="url"
                 value={urlInput}
                 onChange={(e) => setUrlInput(e.target.value)}
                 placeholder="https://www.youtube.com/watch?v=... or direct .mp4/.mov link"

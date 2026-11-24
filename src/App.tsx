@@ -1,6 +1,7 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { SAMPLE_VIDEOS } from './data/sampleVideos';
 import { VideoSource, ClipHighlight, ExportSettings, ClipGenerationOptions } from './types';
+import { ExportPlatform, PLATFORM_PRESETS } from './utils/platformExport';
 import { Header } from './components/Header';
 import { OpusClipHero } from './components/OpusClipHero';
 import { OpusClipFeed } from './components/OpusClipFeed';
@@ -13,10 +14,14 @@ import { VideoImportModal } from './components/VideoImportModal';
 import { ExportModal } from './components/ExportModal';
 import { VideoEffectsPanel } from './components/VideoEffectsPanel';
 import { AiDirectorDrawer, DirectorActions } from './components/AiDirectorDrawer';
+import { MonitoringDashboard } from './components/MonitoringDashboard';
+import { AddSocialAccountModal } from './components/AddSocialAccountModal';
+import { useFirebase } from './contexts/FirebaseContext';
+import { parseJsonResponse } from './utils/safeFetchJson';
 import { Sparkles, Sliders, FileText, ArrowLeft, RefreshCw, Loader2, Palette } from 'lucide-react';
 
 export default function App() {
-  const [appMode, setAppMode] = useState<'generator' | 'feed' | 'studio'>('generator');
+  const [appMode, setAppMode] = useState<'generator' | 'feed' | 'studio' | 'dashboard'>('generator');
   const [currentVideo, setCurrentVideo] = useState<VideoSource>({
     ...SAMPLE_VIDEOS[0],
     playableSourceUrl: SAMPLE_VIDEOS[0].videoUrl,
@@ -59,26 +64,147 @@ export default function App() {
 
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [exportInitialPlatform, setExportInitialPlatform] = useState<ExportPlatform>('tiktok');
+  const [exportAutoStartNonce, setExportAutoStartNonce] = useState(0);
+  const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
+  const [accountModalPlatform, setAccountModalPlatform] = useState<ExportPlatform>('shorts');
   const [isDirectorOpen, setIsDirectorOpen] = useState(false);
   const [isAiScanning, setIsAiScanning] = useState(false);
   const [isReclippingStudio, setIsReclippingStudio] = useState(false);
   const [rightPanelTab, setRightPanelTab] = useState<'style' | 'effects' | 'transcript'>('style');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
+  const { user, workspacePrefs, workspacePrefsLoaded, updateWorkspacePrefs } = useFirebase();
+  const appliedInitialPrefsUidRef = useRef<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  // Hydrate saved caption + video filter preset once per signed-in session
+  useEffect(() => {
+    if (!user) {
+      appliedInitialPrefsUidRef.current = null;
+      return;
+    }
+    if (!workspacePrefsLoaded || appliedInitialPrefsUidRef.current === user.uid) {
+      return;
+    }
+    appliedInitialPrefsUidRef.current = user.uid;
+    if (workspacePrefs.autoApplyStyleAcrossClips) {
+      setSettings((prev) => ({
+        ...prev,
+        captionPreset: workspacePrefs.captionPreset || prev.captionPreset,
+        captionColor: workspacePrefs.captionColor || prev.captionColor,
+        captionHighlightStyle:
+          workspacePrefs.captionHighlightStyle || prev.captionHighlightStyle,
+        videoFilter: workspacePrefs.videoFilter || prev.videoFilter,
+      }));
+    }
+  }, [user, workspacePrefsLoaded, workspacePrefs]);
+
+  // Persist style changes automatically when autoApplyStyleAcrossClips is active
+  useEffect(() => {
+    if (
+      !user ||
+      !workspacePrefsLoaded ||
+      appliedInitialPrefsUidRef.current !== user.uid ||
+      !workspacePrefs.autoApplyStyleAcrossClips
+    ) {
+      return;
+    }
+    const nextFilter = settings.videoFilter || 'none';
+    const nextHighlight = settings.captionHighlightStyle || 'active_box';
+    const unchanged =
+      workspacePrefs.captionPreset === settings.captionPreset &&
+      workspacePrefs.captionColor === settings.captionColor &&
+      workspacePrefs.captionHighlightStyle === nextHighlight &&
+      workspacePrefs.videoFilter === nextFilter;
+
+    if (unchanged) return;
+
+    const timer = setTimeout(() => {
+      updateWorkspacePrefs({
+        captionPreset: settings.captionPreset,
+        captionColor: settings.captionColor,
+        captionHighlightStyle: nextHighlight,
+        videoFilter: nextFilter,
+      }).catch(() => {});
+    }, 700);
+
+    return () => clearTimeout(timer);
+  }, [
+    user,
+    workspacePrefsLoaded,
+    workspacePrefs.autoApplyStyleAcrossClips,
+    workspacePrefs.captionPreset,
+    workspacePrefs.captionColor,
+    workspacePrefs.captionHighlightStyle,
+    workspacePrefs.videoFilter,
+    settings.captionPreset,
+    settings.captionColor,
+    settings.captionHighlightStyle,
+    settings.videoFilter,
+    updateWorkspacePrefs,
+  ]);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3500);
   };
 
+  const handleQuickExportPlatform = (platform: ExportPlatform, clipOverride?: ClipHighlight) => {
+    const targetClip = clipOverride || activeClip;
+    if (!targetClip) return;
+    if (clipOverride) {
+      handleSelectClip(clipOverride);
+    }
+    setExportInitialPlatform(platform);
+    setExportAutoStartNonce((n) => n + 1);
+    setIsExportModalOpen(true);
+    const preset = PLATFORM_PRESETS[platform];
+    showToast(`Quick exporting ${preset.label} (${preset.shortcut})...`);
+  };
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (appMode === 'generator' || isProcessing || !activeClip) return;
+      if (e.ctrlKey || e.metaKey || e.altKey || !e.shiftKey) return;
+
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      const key = e.key.toLowerCase();
+      if (key === 'y') {
+        e.preventDefault();
+        handleQuickExportPlatform('shorts');
+      } else if (key === 't') {
+        e.preventDefault();
+        handleQuickExportPlatform('tiktok');
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [appMode, isProcessing, activeClip]);
+
   const handleSelectClip = (clip: ClipHighlight) => {
     setActiveClip(clip);
     setSettings((prev) => ({
       ...prev,
       hookBannerText: clip.hook,
-      framingMode: clip.framingSuggestion || prev.framingMode,
-      panX: typeof clip.panX === 'number' ? clip.panX : prev.panX,
+      framingMode: workspacePrefs.autoApplyAiFraming
+        ? clip.framingSuggestion || prev.framingMode
+        : prev.framingMode,
+      panX:
+        workspacePrefs.autoApplyAiFraming && typeof clip.panX === 'number'
+          ? clip.panX
+          : prev.panX,
     }));
     setCurrentTime(clip.startTime);
 
@@ -158,7 +284,7 @@ export default function App() {
           captionDropShadow: settings.captionDropShadow,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponse(res, 'Failed to re-clip segment');
       if (!res.ok || !data.downloadUrl) {
         throw new Error(data.error || 'Failed to re-clip segment');
       }
@@ -216,7 +342,7 @@ export default function App() {
           body: JSON.stringify({ url: video.youtubeUrl }),
         });
 
-        const ytData = await ytRes.json();
+        const ytData = await parseJsonResponse(ytRes, 'Could not retrieve YouTube video info');
         if (!ytRes.ok) {
           throw new Error(ytData.error || 'Could not retrieve YouTube video info.');
         }
@@ -243,7 +369,7 @@ export default function App() {
           body: JSON.stringify({ url: video.videoUrl }),
         });
 
-        const urlData = await urlRes.json();
+        const urlData = await parseJsonResponse(urlRes, 'Could not ingest external video URL');
         if (!urlRes.ok || !urlData.playableSourceUrl) {
           throw new Error(urlData.error || 'Could not ingest external video URL.');
         }
@@ -265,10 +391,18 @@ export default function App() {
       }
 
       // Step 2: Multimodal Speech Transcription + Keyframe Visual Inspection
+      const hasTranscript = Boolean(video.transcript && video.transcript.trim().length >= 40);
       setProcessingProgress(36);
-      if ((!video.transcript || video.transcript.trim().length < 40) || !video.visualSummary) {
-        if (video.playableSourceUrl || video.youtubeUrl) {
-          setProcessingStep('2/4: Gemini AI listening to audio & analyzing visual keyframes...');
+      if (!hasTranscript || !video.visualSummary) {
+        const canTranscribeSource = Boolean(
+          video.playableSourceUrl || (video.youtubeUrl && !video.youtubeDownloadBlocked)
+        );
+        if (canTranscribeSource) {
+          setProcessingStep(
+            hasTranscript
+              ? '2/4: Inspecting visual keyframes for 9:16 smart framing...'
+              : '2/4: Gemini AI listening to audio & analyzing visual keyframes...'
+          );
           const trRes = await fetch('/api/transcribe-video', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -276,9 +410,11 @@ export default function App() {
               videoUrl: video.videoUrl,
               playableSourceUrl: video.playableSourceUrl,
               youtubeUrl: video.youtubeUrl,
+              youtubeDownloadBlocked: Boolean(video.youtubeDownloadBlocked),
+              skipAudio: hasTranscript,
             }),
           });
-          const trData = await trRes.json();
+          const trData = await parseJsonResponse(trRes, 'Video transcription failed');
           if (!trRes.ok) {
             if (trData.code === 'MISSING_API_KEY' || trData.code === 'API_KEY_INVALID' || trData.code === 'PERMISSION_DENIED') {
               throw new Error(trData.error);
@@ -326,7 +462,7 @@ export default function App() {
         }),
       });
 
-      const data = await response.json();
+      const data = await parseJsonResponse(response, 'Gemini highlight detection failed');
       if (!response.ok) {
         throw new Error(data.error || 'Gemini highlight detection failed.');
       }
@@ -374,7 +510,7 @@ export default function App() {
         }),
       });
 
-      const autoData = await autoRes.json();
+      const autoData = await parseJsonResponse(autoRes, 'Auto-clipping failed');
       if (autoRes.ok && Array.isArray(autoData.clips)) {
         finalClips = finalClips.map((c) => {
           const matched = autoData.clips.find((m: any) => m.id === c.id);
@@ -412,8 +548,13 @@ export default function App() {
           setSettings((prev) => ({
             ...prev,
             hookBannerText: focusClip.hook,
-            framingMode: focusClip.framingSuggestion || prev.framingMode,
-            panX: typeof focusClip.panX === 'number' ? focusClip.panX : 0,
+            framingMode: workspacePrefs.autoApplyAiFraming
+              ? focusClip.framingSuggestion || prev.framingMode
+              : prev.framingMode,
+            panX:
+              workspacePrefs.autoApplyAiFraming && typeof focusClip.panX === 'number'
+                ? focusClip.panX
+                : prev.panX,
           }));
           setCurrentTime(focusClip.startTime);
         }
@@ -553,6 +694,11 @@ export default function App() {
         onSetAppMode={setAppMode}
         onOpenImportModal={() => setIsImportModalOpen(true)}
         onOpenExportModal={() => setIsExportModalOpen(true)}
+        onQuickExportPlatform={
+          appMode !== 'generator' && activeClip
+            ? (platform) => handleQuickExportPlatform(platform)
+            : undefined
+        }
         onOpenAiDirector={() => setIsDirectorOpen(true)}
       />
 
@@ -581,11 +727,16 @@ export default function App() {
               settings={settings}
               onUpdateSettings={handleUpdateSettings}
               onSelectClipToEdit={handleSelectClipToEdit}
-              onOpenExportModal={(clip) => {
-                handleSelectClip(clip);
-                setIsExportModalOpen(true);
+              onOpenExportModal={(clip, platform) => {
+                if (platform) {
+                  handleQuickExportPlatform(platform, clip);
+                } else {
+                  handleSelectClip(clip);
+                  setIsExportModalOpen(true);
+                }
               }}
               onNewVideo={() => setAppMode('generator')}
+              onOpenDashboard={() => setAppMode('dashboard')}
               onClipUpdated={handleClipUpdated}
               isAiGenerating={isAiScanning}
               onGenerateMoreClips={(customPrompt, clipCount) =>
@@ -600,6 +751,16 @@ export default function App() {
               }
             />
           </div>
+        )}
+
+        {/* Mode 4: Accounts & Monitoring Dashboard */}
+        {appMode === 'dashboard' && (
+          <MonitoringDashboard
+            currentVideo={currentVideo}
+            highlights={currentVideo.highlights}
+            onGoToClips={() => setAppMode('feed')}
+            onNotify={showToast}
+          />
         )}
 
         {/* Mode 3: Studio Editor */}
@@ -789,6 +950,21 @@ export default function App() {
         videoSource={currentVideo}
         settings={settings}
         videoRef={videoRef}
+        initialPlatform={exportInitialPlatform}
+        autoStartNonce={exportAutoStartNonce}
+        onManageAccounts={(platform) => {
+          setIsExportModalOpen(false);
+          setAccountModalPlatform(platform);
+          setIsAccountModalOpen(true);
+        }}
+      />
+
+      {/* Quick Connect Social Account Modal (accessible from Export Modal) */}
+      <AddSocialAccountModal
+        isOpen={isAccountModalOpen}
+        onClose={() => setIsAccountModalOpen(false)}
+        initialPlatform={accountModalPlatform}
+        onSaved={showToast}
       />
 
       {/* Notification Toast */}

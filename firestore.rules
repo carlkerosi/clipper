@@ -1,0 +1,243 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isVerifiedOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidHttpUrl(val) {
+      return val is string && val.size() <= 500 && (val == '' || val.matches('^https?://.*'));
+    }
+
+    function hasParentUser(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId)) ||
+        existsAfter(/databases/$(database)/documents/users/$(userId));
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'photoUrl', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'photoUrl', 'createdAt', 'updatedAt']) &&
+        data.uid is string && data.uid == userId && data.uid == request.auth.uid && isValidId(data.uid) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 200 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+        isValidHttpUrl(data.photoUrl) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSocialAccount(data, userId, accountId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'platform', 'handle', 'displayName', 'profileUrl', 'avatarUrl',
+          'connectionType', 'isDefault', 'followersCount', 'postsCount', 'notes',
+          'lastSyncedAt', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'userId', 'platform', 'handle', 'displayName', 'profileUrl', 'avatarUrl',
+          'connectionType', 'isDefault', 'followersCount', 'postsCount', 'notes',
+          'lastSyncedAt', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id is string && data.id == accountId && isValidId(data.id) &&
+        data.userId is string && data.userId == userId && data.userId == request.auth.uid &&
+        data.platform in ['shorts', 'tiktok', 'reels'] &&
+        data.handle is string && data.handle.size() >= 1 && data.handle.size() <= 100 &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+        isValidHttpUrl(data.profileUrl) &&
+        isValidHttpUrl(data.avatarUrl) &&
+        data.connectionType in ['oauth', 'linked'] &&
+        data.isDefault is bool &&
+        data.followersCount is int && data.followersCount >= 0 && data.followersCount <= 2000000000 &&
+        data.postsCount is int && data.postsCount >= 0 && data.postsCount <= 10000000 &&
+        data.notes is string && data.notes.size() <= 300 &&
+        data.lastSyncedAt is string && data.lastSyncedAt.size() <= 64 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPublishedClip(data, userId, recordId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'accountId', 'accountHandle', 'platform', 'clipId',
+          'clipTitle', 'sourceVideoTitle', 'filename', 'captionCopy', 'status',
+          'postUrl', 'scheduledFor', 'views', 'likes', 'comments', 'shares',
+          'durationSec', 'viralityScore', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'userId', 'accountId', 'accountHandle', 'platform', 'clipId',
+          'clipTitle', 'sourceVideoTitle', 'filename', 'captionCopy', 'status',
+          'postUrl', 'scheduledFor', 'views', 'likes', 'comments', 'shares',
+          'durationSec', 'viralityScore', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id is string && data.id == recordId && isValidId(data.id) &&
+        data.userId is string && data.userId == userId && data.userId == request.auth.uid &&
+        data.accountId is string && data.accountId.size() <= 128 &&
+        data.accountHandle is string && data.accountHandle.size() <= 100 &&
+        data.platform in ['shorts', 'tiktok', 'reels'] &&
+        data.clipId is string && data.clipId.size() >= 1 && data.clipId.size() <= 128 &&
+        data.clipTitle is string && data.clipTitle.size() >= 1 && data.clipTitle.size() <= 200 &&
+        data.sourceVideoTitle is string && data.sourceVideoTitle.size() <= 200 &&
+        data.filename is string && data.filename.size() <= 200 &&
+        data.captionCopy is string && data.captionCopy.size() <= 2000 &&
+        data.status in ['exported', 'scheduled', 'published'] &&
+        isValidHttpUrl(data.postUrl) &&
+        data.scheduledFor is string && data.scheduledFor.size() <= 64 &&
+        data.views is int && data.views >= 0 && data.views <= 2000000000 &&
+        data.likes is int && data.likes >= 0 && data.likes <= 2000000000 &&
+        data.comments is int && data.comments >= 0 && data.comments <= 2000000000 &&
+        data.shares is int && data.shares >= 0 && data.shares <= 2000000000 &&
+        data.durationSec is int && data.durationSec >= 0 && data.durationSec <= 600 &&
+        data.viralityScore is int && data.viralityScore >= 0 && data.viralityScore <= 100 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidWorkspacePreferences(data, userId, prefId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'autoApplyAccounts', 'autoApplyAiFraming',
+          'autoApplyStyleAcrossClips', 'autoSyncStatsOnOpen', 'captionPreset',
+          'captionColor', 'captionHighlightStyle', 'videoFilter', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'userId', 'autoApplyAccounts', 'autoApplyAiFraming',
+          'autoApplyStyleAcrossClips', 'autoSyncStatsOnOpen', 'captionPreset',
+          'captionColor', 'captionHighlightStyle', 'videoFilter', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id is string && data.id == prefId && isValidId(data.id) &&
+        data.userId is string && data.userId == userId && data.userId == request.auth.uid &&
+        data.autoApplyAccounts is bool &&
+        data.autoApplyAiFraming is bool &&
+        data.autoApplyStyleAcrossClips is bool &&
+        data.autoSyncStatsOnOpen is bool &&
+        data.captionPreset is string && data.captionPreset.size() <= 64 &&
+        data.captionColor is string && data.captionColor.size() <= 32 &&
+        data.captionHighlightStyle is string && data.captionHighlightStyle.size() <= 32 &&
+        data.videoFilter is string && data.videoFilter.size() <= 32 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    match /users/{userId} {
+      allow get: if isVerifiedOwner(userId) && isValidId(userId);
+      allow list: if false;
+      allow create: if isVerifiedOwner(userId) &&
+        isValidId(userId) &&
+        isValidUserProfile(incoming(), userId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isVerifiedOwner(userId) &&
+        isValidId(userId) &&
+        isValidUserProfile(incoming(), userId) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'photoUrl', 'updatedAt']);
+      allow delete: if false;
+
+      match /socialAccounts/{accountId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(accountId);
+        allow list: if isVerifiedOwner(userId) && existing().userId == request.auth.uid;
+        allow create: if isVerifiedOwner(userId) &&
+          isValidId(accountId) &&
+          isValidSocialAccount(incoming(), userId, accountId) &&
+          hasParentUser(userId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isVerifiedOwner(userId) &&
+          isValidId(accountId) &&
+          isValidSocialAccount(incoming(), userId, accountId) &&
+          hasParentUser(userId) &&
+          incoming().id == existing().id &&
+          incoming().userId == existing().userId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'profileUrl', 'avatarUrl', 'connectionType',
+              'followersCount', 'postsCount', 'notes', 'lastSyncedAt', 'updatedAt'
+            ]) ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['isDefault', 'updatedAt'])
+          );
+        allow delete: if isVerifiedOwner(userId) && isValidId(accountId);
+      }
+
+      match /publishedClips/{recordId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(recordId);
+        allow list: if isVerifiedOwner(userId) && existing().userId == request.auth.uid;
+        allow create: if isVerifiedOwner(userId) &&
+          isValidId(recordId) &&
+          isValidPublishedClip(incoming(), userId, recordId) &&
+          hasParentUser(userId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isVerifiedOwner(userId) &&
+          isValidId(recordId) &&
+          isValidPublishedClip(incoming(), userId, recordId) &&
+          hasParentUser(userId) &&
+          incoming().id == existing().id &&
+          incoming().userId == existing().userId &&
+          incoming().clipId == existing().clipId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (existing().status != 'published' || incoming().status == 'published') &&
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'postUrl', 'scheduledFor', 'accountId', 'accountHandle', 'captionCopy', 'updatedAt'
+            ]) ||
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'views', 'likes', 'comments', 'shares', 'postUrl', 'captionCopy', 'updatedAt'
+            ])
+          );
+        allow delete: if isVerifiedOwner(userId) && isValidId(recordId);
+      }
+
+      match /preferences/{prefId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(prefId);
+        allow list: if isVerifiedOwner(userId) && existing().userId == request.auth.uid;
+        allow create: if isVerifiedOwner(userId) &&
+          isValidId(prefId) &&
+          isValidWorkspacePreferences(incoming(), userId, prefId) &&
+          hasParentUser(userId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isVerifiedOwner(userId) &&
+          isValidId(prefId) &&
+          isValidWorkspacePreferences(incoming(), userId, prefId) &&
+          hasParentUser(userId) &&
+          incoming().id == existing().id &&
+          incoming().userId == existing().userId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'autoApplyAccounts', 'autoApplyAiFraming', 'autoApplyStyleAcrossClips',
+            'autoSyncStatsOnOpen', 'captionPreset', 'captionColor',
+            'captionHighlightStyle', 'videoFilter', 'updatedAt'
+          ]);
+        allow delete: if false;
+      }
+    }
+  }
+}

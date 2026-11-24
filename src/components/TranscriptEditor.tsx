@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { FileText, Sparkles, Edit3, Check, Clock, Tag, Languages, AlertCircle } from 'lucide-react';
 import { ClipHighlight, CaptionChunk } from '../types';
+import { parseJsonResponse } from '../utils/safeFetchJson';
 
 interface TranscriptEditorProps {
   activeClip: ClipHighlight;
@@ -31,10 +32,19 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
 
   const handleSaveEdit = (index: number) => {
     const updated = [...activeClip.captions];
+    const chunk = updated[index];
+    const wordsList = editText.trim().split(/\s+/).filter(Boolean);
+    const seg = (chunk.end - chunk.start) / Math.max(1, wordsList.length);
+    const nextWords = wordsList.map((w, wi) => ({
+      w,
+      start: Math.round((chunk.start + wi * seg) * 10) / 10,
+      end: Math.round((chunk.start + (wi + 1) * seg) * 10) / 10,
+    }));
     updated[index] = {
-      ...updated[index],
-      text: editText,
-      emphasisWord: editEmphasis || undefined,
+      ...chunk,
+      text: editText.trim(),
+      emphasisWord: editEmphasis.trim() || undefined,
+      words: nextWords,
     };
     onUpdateCaptions(updated);
     setEditingIndex(null);
@@ -56,7 +66,7 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
         }),
       });
 
-      const data = await res.json();
+      const data = await parseJsonResponse(res, 'Failed to regenerate captions');
       if (!res.ok) {
         throw new Error(data.error || 'Failed to regenerate captions.');
       }
@@ -83,7 +93,7 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
           targetLanguage: targetLang,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponse(res, 'Failed to transform captions');
       if (!res.ok) {
         throw new Error(data.error || 'Failed to transform captions.');
       }

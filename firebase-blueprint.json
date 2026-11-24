@@ -1,0 +1,329 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated creator profile owning connected social accounts and clip publishing records.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 200
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "photoUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "displayName", "photoUrl", "createdAt", "updatedAt"]
+    },
+    "SocialAccount": {
+      "title": "SocialAccount",
+      "description": "Connected or linked creator account for YouTube Shorts, TikTok, or Instagram Reels.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "platform": {
+          "type": "string",
+          "enum": ["shorts", "tiktok", "reels"]
+        },
+        "handle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "profileUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "avatarUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "connectionType": {
+          "type": "string",
+          "enum": ["oauth", "linked"]
+        },
+        "isDefault": {
+          "type": "boolean"
+        },
+        "followersCount": {
+          "type": "integer"
+        },
+        "postsCount": {
+          "type": "integer"
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "lastSyncedAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "platform",
+        "handle",
+        "displayName",
+        "profileUrl",
+        "avatarUrl",
+        "connectionType",
+        "isDefault",
+        "followersCount",
+        "postsCount",
+        "notes",
+        "lastSyncedAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "PublishedClip": {
+      "title": "PublishedClip",
+      "description": "Exported, scheduled, or published short-form clip tracked on the creator monitoring dashboard.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "accountId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "accountHandle": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "platform": {
+          "type": "string",
+          "enum": ["shorts", "tiktok", "reels"]
+        },
+        "clipId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "clipTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "sourceVideoTitle": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "filename": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "captionCopy": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "status": {
+          "type": "string",
+          "enum": ["exported", "scheduled", "published"]
+        },
+        "postUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "scheduledFor": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "views": {
+          "type": "integer"
+        },
+        "likes": {
+          "type": "integer"
+        },
+        "comments": {
+          "type": "integer"
+        },
+        "shares": {
+          "type": "integer"
+        },
+        "durationSec": {
+          "type": "integer"
+        },
+        "viralityScore": {
+          "type": "integer"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "accountId",
+        "accountHandle",
+        "platform",
+        "clipId",
+        "clipTitle",
+        "sourceVideoTitle",
+        "filename",
+        "captionCopy",
+        "status",
+        "postUrl",
+        "scheduledFor",
+        "views",
+        "likes",
+        "comments",
+        "shares",
+        "durationSec",
+        "viralityScore",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "WorkspacePreferences": {
+      "title": "WorkspacePreferences",
+      "description": "Persisted auto-apply preferences for social account routing, AI framing, style presets, and dashboard metric sync.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "autoApplyAccounts": {
+          "type": "boolean"
+        },
+        "autoApplyAiFraming": {
+          "type": "boolean"
+        },
+        "autoApplyStyleAcrossClips": {
+          "type": "boolean"
+        },
+        "autoSyncStatsOnOpen": {
+          "type": "boolean"
+        },
+        "captionPreset": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "captionColor": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "captionHighlightStyle": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "videoFilter": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "autoApplyAccounts",
+        "autoApplyAiFraming",
+        "autoApplyStyleAcrossClips",
+        "autoSyncStatsOnOpen",
+        "captionPreset",
+        "captionColor",
+        "captionHighlightStyle",
+        "videoFilter",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private user profile root document for PII isolation and subcollection ownership checks."
+    },
+    "/users/{userId}/socialAccounts/{accountId}": {
+      "schema": { "$ref": "#/entities/SocialAccount" },
+      "description": "Creator social media accounts connected or linked per platform."
+    },
+    "/users/{userId}/publishedClips/{recordId}": {
+      "schema": { "$ref": "#/entities/PublishedClip" },
+      "description": "Exported, scheduled, and published clip records monitored across YouTube Shorts, TikTok, and Instagram Reels."
+    },
+    "/users/{userId}/preferences/{prefId}": {
+      "schema": { "$ref": "#/entities/WorkspacePreferences" },
+      "description": "Persisted auto-apply preferences for social routing, AI framing, style defaults, and live stats syncing."
+    }
+  }
+}
