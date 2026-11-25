@@ -27,6 +27,7 @@ interface HeaderProps {
   onOpenExportModal: () => void;
   onQuickExportPlatform?: (platform: ExportPlatform) => void;
   onOpenAiDirector?: () => void;
+  onOpenAddSocialModal?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -38,6 +39,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenExportModal,
   onQuickExportPlatform,
   onOpenAiDirector,
+  onOpenAddSocialModal,
 }) => {
   const { socialAccounts, getDefaultAccountForPlatform } = useFirebase();
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
@@ -251,13 +253,25 @@ export const Header: React.FC<HeaderProps> = ({
                   >
                     Custom Export Options...
                   </button>
+                  {onOpenAddSocialModal && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsExportMenuOpen(false);
+                        onOpenAddSocialModal();
+                      }}
+                      className="w-full px-2.5 py-1.5 rounded-lg hover:bg-zinc-800 text-xs text-emerald-400 text-left transition-colors cursor-pointer"
+                    >
+                      + Add Social Account...
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => {
                       setIsExportMenuOpen(false);
                       onSetAppMode('dashboard');
                     }}
-                    className="w-full px-2.5 py-1.5 rounded-lg hover:bg-zinc-800 text-xs text-emerald-400 text-left transition-colors cursor-pointer"
+                    className="w-full px-2.5 py-1.5 rounded-lg hover:bg-zinc-800 text-xs text-zinc-300 text-left transition-colors cursor-pointer"
                   >
                     Manage Social Accounts & Monitor...
                   </button>

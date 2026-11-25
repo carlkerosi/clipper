@@ -1905,6 +1905,9 @@ function buildAssSubtitlesFile(options: {
   captionTextCase?: string;
   captionOutlineWidth?: number;
   captionDropShadow?: boolean;
+  playbackSpeed?: number;
+  showHookBanner?: boolean;
+  hookBannerText?: string;
 }): string {
   const {
     captions,
@@ -1917,10 +1920,15 @@ function buildAssSubtitlesFile(options: {
     captionTextCase = "uppercase",
     captionOutlineWidth = 6,
     captionDropShadow = true,
+    playbackSpeed = 1,
+    showHookBanner = false,
+    hookBannerText = "",
   } = options;
+  const speed = Math.max(0.75, Math.min(1.5, Number(playbackSpeed) || 1));
   const playW = resolution === "1080p" ? 1080 : 720;
   const playH = resolution === "1080p" ? 1920 : 1280;
   const fontSize = Math.round((resolution === "1080p" ? 1.5 : 1.0) * (captionFontSize || 34) * 1.45);
+  const bannerFontSize = Math.round((resolution === "1080p" ? 1.5 : 1.0) * 32);
   const marginV =
     captionPosition === "top"
       ? Math.round(playH * 0.72)
@@ -1951,15 +1959,35 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Default,${assFont},${fontSize},${baseBgr},${accentBgr},&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,${safeOutline},${shadowVal},2,48,48,${marginV},1
+Style: HookBanner,${assFont},${bannerFontSize},&H000B0909,&H00FFFFFF,&H00FFFFFF,&H00FFFFFF,-1,0,0,0,100,100,0,0,3,16,0,8,54,54,${Math.round(playH * 0.09)},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`;
 
-  const events = captions
+  const events: string[] = [];
+
+  if (showHookBanner && hookBannerText && hookBannerText.trim()) {
+    const maxEndSec = Math.max(
+      4,
+      captions.reduce((mx, c) => Math.max(mx, Number(c?.end) || 0), 0) / speed
+    );
+    const cleanBanner = hookBannerText
+      .trim()
+      .replace(/\r?\n/g, " ")
+      .replace(/[{}]/g, "")
+      .slice(0, 72);
+    events.push(
+      `Dialogue: 1,${formatAssTime(0)},${formatAssTime(Math.min(5.5, maxEndSec))},HookBanner,,0,0,0,,${cleanBanner}`
+    );
+  }
+
+  captions
     .filter((c) => c && c.text)
-    .map((c) => {
-      const start = formatAssTime(Number(c.start) || 0);
-      const end = formatAssTime(Math.max((Number(c.start) || 0) + 0.5, Number(c.end) || 3));
+    .forEach((c) => {
+      const scaledStart = (Number(c.start) || 0) / speed;
+      const scaledEnd = Math.max(scaledStart + 0.45, (Number(c.end) || 3) / speed);
+      const start = formatAssTime(scaledStart);
+      const end = formatAssTime(scaledEnd);
       let text = applyAssTextCase(
         String(c.text || "").replace(/\r?\n/g, " ").replace(/[{}]/g, ""),
         captionTextCase
@@ -1971,10 +1999,63 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
           text = text.replace(new RegExp(`(${escaped})`, "i"), `{\\c${accentBgr}\\b1}$1{\\c${baseBgr}}`);
         }
       }
-      return `Dialogue: 0,${start},${end},Default,,0,0,0,,${text}`;
+      events.push(`Dialogue: 0,${start},${end},Default,,0,0,0,,${text}`);
     });
 
   return `${header}\n${events.join("\n")}\n`;
+}
+
+function buildFfmpegColorFilters(options: {
+  videoFilter?: string;
+  filterBrightness?: number;
+  filterContrast?: number;
+  filterSaturate?: number;
+}): string[] {
+  const filters: string[] = [];
+  const preset = String(options.videoFilter || "none");
+
+  switch (preset) {
+    case "grayscale":
+      filters.push("hue=s=0");
+      break;
+    case "sepia":
+      filters.push("colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131");
+      break;
+    case "high_contrast":
+      filters.push("eq=contrast=1.40:saturation=1.10");
+      break;
+    case "vivid":
+      filters.push("eq=saturation=1.50:contrast=1.12:brightness=0.03");
+      break;
+    case "noir":
+      filters.push("hue=s=0,eq=contrast=1.50:brightness=-0.06");
+      break;
+    case "warm":
+      filters.push("colorbalance=rs=0.14:gs=0.04:bs=-0.12,eq=saturation=1.22");
+      break;
+    case "cool":
+      filters.push("colorbalance=rs=-0.10:gs=0.02:bs=0.14,eq=saturation=1.15:contrast=1.06");
+      break;
+    case "vintage":
+      filters.push("colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131,eq=contrast=1.12:brightness=-0.04:saturation=0.85");
+      break;
+    default:
+      break;
+  }
+
+  const bPct = Number(options.filterBrightness ?? 100);
+  const cPct = Number(options.filterContrast ?? 100);
+  const sPct = Number(options.filterSaturate ?? 100);
+  if (bPct !== 100 || cPct !== 100 || sPct !== 100) {
+    const eqBrightness = Math.max(-0.5, Math.min(0.5, (bPct - 100) / 220));
+    const eqContrast = Math.max(0.4, Math.min(2.2, cPct / 100));
+    const eqSaturate = Math.max(0, Math.min(2.5, sPct / 100));
+    filters.push(
+      `eq=brightness=${eqBrightness.toFixed(3)}:contrast=${eqContrast.toFixed(2)}:saturation=${eqSaturate.toFixed(2)}`
+    );
+  }
+
+  return filters;
 }
 
 function buildVerticalFilter(
@@ -2035,6 +2116,15 @@ async function clipVideoSegment(options: {
   captionTextCase?: string;
   captionOutlineWidth?: number;
   captionDropShadow?: boolean;
+  videoFilter?: string;
+  filterBrightness?: number;
+  filterContrast?: number;
+  filterSaturate?: number;
+  playbackSpeed?: number;
+  normalizeAudio?: boolean;
+  showHookBanner?: boolean;
+  hookBannerText?: string;
+  forceUniformAudio?: boolean;
 }): Promise<{ downloadUrl: string; filename: string; duration: number }> {
   const {
     videoUrl = "",
@@ -2057,24 +2147,49 @@ async function clipVideoSegment(options: {
     captionTextCase = "uppercase",
     captionOutlineWidth = 6,
     captionDropShadow = true,
+    videoFilter = "none",
+    filterBrightness = 100,
+    filterContrast = 100,
+    filterSaturate = 100,
+    playbackSpeed = 1,
+    normalizeAudio = false,
+    showHookBanner = false,
+    hookBannerText = "",
+    forceUniformAudio = false,
   } = options;
 
   const startSec = Math.max(0, Math.floor(startTime));
   const durSec = Math.max(3, Math.min(300, Math.ceil(duration)));
   const endSec = startSec + durSec;
   const safePan = Math.max(-100, Math.min(100, Math.round(Number(panX) || 0)));
+  const safeSpeed = Math.max(0.75, Math.min(1.5, Number(playbackSpeed) || 1));
+  const hasAdvancedFx =
+    (videoFilter && videoFilter !== "none") ||
+    filterBrightness !== 100 ||
+    filterContrast !== 100 ||
+    filterSaturate !== 100 ||
+    safeSpeed !== 1 ||
+    normalizeAudio ||
+    (showHookBanner && Boolean(hookBannerText));
 
   const safeClipId = clipId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 32);
   const cleanTitle = title.replace(/[^a-zA-Z0-9]/g, "_").toLowerCase().slice(0, 20) || "clip";
+  const fxHash = hasAdvancedFx
+    ? `_${crypto
+        .createHash("md5")
+        .update(`${videoFilter}_${filterBrightness}_${filterContrast}_${filterSaturate}_${safeSpeed}_${normalizeAudio}_${showHookBanner}_${hookBannerText}`)
+        .digest("hex")
+        .slice(0, 6)}`
+    : "";
   const subTag = burnCaptions && Array.isArray(captions) && captions.length > 0 ? "_sub" : "";
-  const clipFilename = `${safeClipId}_${cleanTitle}_s${startSec}_d${durSec}_p${safePan}_${resolution}_${framingMode}${subTag}.mp4`;
+  const clipFilename = `${safeClipId}_${cleanTitle}_s${startSec}_d${durSec}_p${safePan}_${resolution}_${framingMode}${fxHash}${subTag}.mp4`;
   const finalOut = path.join(clipsDir, clipFilename);
 
-  if (!burnCaptions && fs.existsSync(finalOut) && fs.statSync(finalOut).size > 10000) {
+  if (!burnCaptions && !hasAdvancedFx && !forceUniformAudio && fs.existsSync(finalOut) && fs.statSync(finalOut).size > 10000) {
     return {
       downloadUrl: `/clips/${clipFilename}`,
       filename: clipFilename,
-      duration: Math.round(duration),
+      duration: Math.round(duration / safeSpeed),
     };
   }
 
@@ -2140,14 +2255,32 @@ async function clipVideoSegment(options: {
   try {
     const probe = await probeVideoFile(localInput);
     const { filter: baseFilter, isComplex } = buildVerticalFilter(resolution, framingMode, panX);
-    let finalFilter = baseFilter;
+    const postVideoSteps: string[] = [];
 
-    if (burnCaptions && Array.isArray(captions) && captions.length > 0) {
+    const colorSteps = buildFfmpegColorFilters({
+      videoFilter,
+      filterBrightness,
+      filterContrast,
+      filterSaturate,
+    });
+    if (colorSteps.length > 0) {
+      postVideoSteps.push(...colorSteps);
+    }
+
+    if (safeSpeed !== 1) {
+      postVideoSteps.push(`setpts=PTS/${safeSpeed.toFixed(3)}`);
+    }
+
+    const shouldWriteAss =
+      (burnCaptions && Array.isArray(captions) && captions.length > 0) ||
+      (showHookBanner && Boolean(hookBannerText && hookBannerText.trim()));
+
+    if (shouldWriteAss) {
       tempAssFile = `/tmp/sub_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.ass`;
       fs.writeFileSync(
         tempAssFile,
         buildAssSubtitlesFile({
-          captions,
+          captions: burnCaptions && Array.isArray(captions) ? captions : [],
           resolution,
           captionColor,
           captionBaseColor,
@@ -2157,12 +2290,18 @@ async function clipVideoSegment(options: {
           captionTextCase,
           captionOutlineWidth,
           captionDropShadow,
+          playbackSpeed: safeSpeed,
+          showHookBanner,
+          hookBannerText,
         }),
         "utf-8"
       );
       const escapedAss = tempAssFile.replace(/:/g, "\\:");
-      finalFilter = `${baseFilter},ass=${escapedAss}`;
+      postVideoSteps.push(`ass=${escapedAss}`);
     }
+
+    const finalFilter =
+      postVideoSteps.length > 0 ? `${baseFilter},${postVideoSteps.join(",")}` : baseFilter;
 
     const ffArgs: string[] = ["-y"];
     if (!tempYtDownload) {
@@ -2170,10 +2309,26 @@ async function clipVideoSegment(options: {
     }
     ffArgs.push("-i", localInput, "-t", String(durSec));
 
+    if (!probe.hasAudio && forceUniformAudio) {
+      const targetOutDur = Math.max(1, durSec / safeSpeed);
+      ffArgs.push(
+        "-f",
+        "lavfi",
+        "-t",
+        targetOutDur.toFixed(2),
+        "-i",
+        "anullsrc=channel_layout=stereo:sample_rate=44100"
+      );
+    }
+
     if (isComplex) {
       ffArgs.push("-filter_complex", finalFilter);
     } else {
       ffArgs.push("-vf", finalFilter);
+    }
+
+    if (forceUniformAudio) {
+      ffArgs.push("-r", "30");
     }
 
     ffArgs.push(
@@ -2186,7 +2341,22 @@ async function clipVideoSegment(options: {
     );
 
     if (probe.hasAudio) {
+      const audioFilters: string[] = [];
+      if (normalizeAudio) {
+        audioFilters.push("highpass=f=85", "dynaudnorm=f=150:g=15");
+      }
+      if (safeSpeed !== 1) {
+        audioFilters.push(`atempo=${safeSpeed.toFixed(3)}`);
+      }
+      if (audioFilters.length > 0) {
+        ffArgs.push("-af", audioFilters.join(","));
+      }
+      if (forceUniformAudio) {
+        ffArgs.push("-ar", "44100", "-ac", "2");
+      }
       ffArgs.push("-c:a", "aac", "-b:a", "128k");
+    } else if (forceUniformAudio) {
+      ffArgs.push("-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-b:a", "128k", "-shortest");
     } else {
       ffArgs.push("-an");
     }
@@ -2194,7 +2364,7 @@ async function clipVideoSegment(options: {
     ffArgs.push("-movflags", "+faststart", finalOut);
 
     await execFileAsync("ffmpeg", ffArgs, {
-      timeout: 25000,
+      timeout: 30000,
       maxBuffer: 10 * 1024 * 1024,
     });
 
@@ -2205,7 +2375,7 @@ async function clipVideoSegment(options: {
     return {
       downloadUrl: `/clips/${clipFilename}`,
       filename: clipFilename,
-      duration: durSec,
+      duration: Math.max(2, Math.round(durSec / safeSpeed)),
     };
   } finally {
     if (tempYtDownload && fs.existsSync(tempYtDownload)) {
@@ -2313,7 +2483,7 @@ app.post("/api/auto-clip", async (req, res) => {
   }
 });
 
-// Single 9:16 Video Clipper / Re-clipper endpoint (supports burned ASS captions)
+// Single 9:16 Video Clipper / Re-clipper endpoint (supports burned ASS captions, color grade, speed, audio mastering, hook banner)
 app.post("/api/clip-video", async (req, res) => {
   try {
     const {
@@ -2337,6 +2507,14 @@ app.post("/api/clip-video", async (req, res) => {
       captionTextCase = "uppercase",
       captionOutlineWidth = 6,
       captionDropShadow = true,
+      videoFilter = "none",
+      filterBrightness = 100,
+      filterContrast = 100,
+      filterSaturate = 100,
+      playbackSpeed = 1,
+      normalizeAudio = false,
+      showHookBanner = false,
+      hookBannerText = "",
     } = req.body;
 
     const result = await clipVideoSegment({
@@ -2360,6 +2538,14 @@ app.post("/api/clip-video", async (req, res) => {
       captionTextCase,
       captionOutlineWidth,
       captionDropShadow,
+      videoFilter,
+      filterBrightness: Number(filterBrightness ?? 100),
+      filterContrast: Number(filterContrast ?? 100),
+      filterSaturate: Number(filterSaturate ?? 100),
+      playbackSpeed: Number(playbackSpeed ?? 1),
+      normalizeAudio: Boolean(normalizeAudio),
+      showHookBanner: Boolean(showHookBanner),
+      hookBannerText: String(hookBannerText || ""),
     });
 
     return res.json({
@@ -2372,6 +2558,312 @@ app.post("/api/clip-video", async (req, res) => {
   } catch (err: any) {
     console.error("Clip endpoint error:", err);
     return res.status(500).json({ error: err.message || "Failed to clip video" });
+  }
+});
+
+// Merge multiple selected clips into a single continuous 9:16 compilation MP4
+app.post("/api/merge-clips", async (req, res) => {
+  const segmentPaths: string[] = [];
+  try {
+    const {
+      videoUrl = "",
+      playableSourceUrl = "",
+      youtubeUrl = "",
+      clips = [],
+      resolution = "1080p",
+      framingMode = "smart_crop",
+      panX = 0,
+      burnCaptions = true,
+      captionColor = "#22C55E",
+      captionBaseColor = "#FFFFFF",
+      captionPosition = "lower_third",
+      captionFontSize = 34,
+      captionFontFamily = "Montserrat",
+      captionTextCase = "uppercase",
+      captionOutlineWidth = 6,
+      captionDropShadow = true,
+      videoFilter = "none",
+      filterBrightness = 100,
+      filterContrast = 100,
+      filterSaturate = 100,
+      playbackSpeed = 1,
+      normalizeAudio = true,
+      title = "compilation",
+      platform = "tiktok",
+    } = req.body;
+
+    if (!Array.isArray(clips) || clips.length < 2) {
+      return res.status(400).json({ error: "Select at least 2 clips to merge into a compilation." });
+    }
+
+    const safeRes = resolution === "1080p" ? "1080p" : "720p";
+    const limitedClips = clips.slice(0, 6);
+    const renderedSegments: { filepath: string; duration: number }[] = [];
+
+    for (let i = 0; i < limitedClips.length; i++) {
+      const c = limitedClips[i];
+      const dur = Math.max(3, Math.round((Number(c.endTime) || 15) - (Number(c.startTime) || 0)));
+      const segResult = await clipVideoSegment({
+        videoUrl,
+        playableSourceUrl,
+        youtubeUrl,
+        startTime: Number(c.startTime) || 0,
+        duration: dur,
+        resolution: safeRes,
+        framingMode: c.framingSuggestion || framingMode,
+        panX: typeof c.panX === "number" ? c.panX : panX,
+        title: c.title || `part_${i + 1}`,
+        clipId: `merge_${Date.now()}_${i}`,
+        burnCaptions: Boolean(burnCaptions),
+        captions: Array.isArray(c.captions) ? c.captions : [],
+        captionColor,
+        captionBaseColor,
+        captionPosition,
+        captionFontSize,
+        captionFontFamily,
+        captionTextCase,
+        captionOutlineWidth,
+        captionDropShadow,
+        videoFilter,
+        filterBrightness: Number(filterBrightness ?? 100),
+        filterContrast: Number(filterContrast ?? 100),
+        filterSaturate: Number(filterSaturate ?? 100),
+        playbackSpeed: Number(playbackSpeed ?? 1),
+        normalizeAudio: Boolean(normalizeAudio),
+        forceUniformAudio: true,
+      });
+
+      const localSeg = path.join(clipsDir, segResult.filename);
+      segmentPaths.push(localSeg);
+      renderedSegments.push({ filepath: localSeg, duration: segResult.duration });
+    }
+
+    const cleanTitle = String(title || "compilation")
+      .replace(/[^a-zA-Z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .toLowerCase()
+      .slice(0, 24) || "compilation";
+    const outFilename = `clipforge_${platform}_${cleanTitle}_mashup_${Date.now()}.mp4`;
+    const outPath = path.join(clipsDir, outFilename);
+
+    const ffArgs: string[] = ["-y"];
+    renderedSegments.forEach((seg) => {
+      ffArgs.push("-i", seg.filepath);
+    });
+
+    const concatInputs = renderedSegments.map((_, idx) => `[${idx}:v][${idx}:a]`).join("");
+    ffArgs.push(
+      "-filter_complex",
+      `${concatInputs}concat=n=${renderedSegments.length}:v=1:a=1[outv][outa]`,
+      "-map",
+      "[outv]",
+      "-map",
+      "[outa]",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "128k",
+      "-movflags",
+      "+faststart",
+      outPath
+    );
+
+    await execFileAsync("ffmpeg", ffArgs, {
+      timeout: 35000,
+      maxBuffer: 12 * 1024 * 1024,
+    });
+
+    if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 1000) {
+      throw new Error("FFmpeg produced an empty merged compilation.");
+    }
+
+    const totalDuration = renderedSegments.reduce((sum, s) => sum + s.duration, 0);
+    return res.json({
+      success: true,
+      downloadUrl: `/clips/${outFilename}`,
+      filename: outFilename,
+      duration: totalDuration,
+      clipCount: renderedSegments.length,
+    });
+  } catch (err: any) {
+    console.error("Merge clips error:", err);
+    return res.status(500).json({ error: err.message || "Failed to merge clips into compilation" });
+  } finally {
+    segmentPaths.forEach((p) => {
+      if (fs.existsSync(p)) fs.unlink(p, () => {});
+    });
+  }
+});
+
+// Gemini AI Viral Retention Boost: rewrites hook, tightens trim, polishes captions & suggests styling
+app.post("/api/ai-optimize-clip", async (req, res) => {
+  try {
+    const { clip, videoTitle = "", fullDuration = 60, transcript = "" } = req.body;
+    if (!clip || !clip.title) {
+      return res.status(400).json({ error: "Clip object is required for AI optimization." });
+    }
+
+    const ai = getGeminiClient();
+    const clipStart = Number(clip.startTime) || 0;
+    const clipEnd = Math.max(clipStart + 4, Number(clip.endTime) || clipStart + 25);
+    const clipDur = clipEnd - clipStart;
+    const existingDialogue = Array.isArray(clip.captions)
+      ? clip.captions.map((c: any) => `[${Number(c.start || 0).toFixed(1)}s-${Number(c.end || 2).toFixed(1)}s] ${c.text}`).join("\n")
+      : "";
+
+    const prompt = `You are a world-class short-form retention strategist (OpusClip / MrBeast / Hormozi editor).
+Audit and SUPERCHARGE this vertical short clip for maximum 3-second hook hold and completion rate on TikTok & YouTube Shorts.
+
+SOURCE VIDEO TITLE: ${videoTitle || "Untitled"}
+FULL VIDEO DURATION: ${Math.round(Number(fullDuration) || clipEnd)}s
+CURRENT CLIP RANGE: ${clipStart.toFixed(1)}s to ${clipEnd.toFixed(1)}s (${clipDur.toFixed(1)}s)
+CURRENT TITLE: ${clip.title}
+CURRENT HOOK: ${clip.hook || ""}
+CURRENT REASON: ${clip.reason || ""}
+VISUAL CONTEXT: ${clip.visualContext || "Speaker / visual action"}
+CURRENT CAPTIONS:
+${existingDialogue || "(none)"}
+SOURCE TRANSCRIPT EXCERPT:
+${String(transcript || "").slice(0, 1800)}
+
+YOUR OPTIMIZATION TASK:
+1. Rewrite "improvedTitle" (punchy <= 60 chars, curiosity gap, zero clickbait filler).
+2. Rewrite "improvedHook" (scroll-stopping 3-second opening hook, <= 12 words).
+3. Rewrite "improvedReason" (crisp explanation of the retention curve & payoff).
+4. Tighten "recommendedStartTime" and "recommendedEndTime" inside [0, ${Math.max(clipEnd, Number(fullDuration) || clipEnd).toFixed(1)}] (keep between 8s and 58s; shave dead lead-in or trailing fluff if helpful).
+5. Rewrite "captions" as rapid-fire 3-6 word rhythmic subtitle chunks spanning 0s to (recommendedEndTime - recommendedStartTime), preserving real meaning while cutting filler words, picking one single UPPERCASE "emphasisWord" per chunk.
+6. Recommend the optimal editing stack:
+   - "recommendedCaptionPreset": one of "opus_box", "opus_classic", "hormozi", "tiktok_neon", "beast_flame", "minimal_cinema"
+   - "recommendedFilter": one of "none", "vivid", "high_contrast", "warm", "cool", "noir"
+   - "recommendedSpeed": one of 1, 1.15, 1.25
+   - "recommendedFraming": one of "smart_crop", "split_screen", "blur_fit", "clean_box"
+7. Output boosted realistic scores (75-99) and a crisp 1-sentence "retentionCritique" + 5 high-signal hashtags.`;
+
+    const response = await generateContentResilient(ai, {
+      contents: prompt,
+      config: {
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            improvedTitle: { type: Type.STRING },
+            improvedHook: { type: Type.STRING },
+            improvedReason: { type: Type.STRING },
+            retentionCritique: { type: Type.STRING },
+            recommendedStartTime: { type: Type.NUMBER },
+            recommendedEndTime: { type: Type.NUMBER },
+            recommendedFraming: {
+              type: Type.STRING,
+              enum: ["smart_crop", "split_screen", "blur_fit", "clean_box"],
+            },
+            recommendedCaptionPreset: {
+              type: Type.STRING,
+              enum: ["opus_box", "opus_classic", "hormozi", "tiktok_neon", "beast_flame", "minimal_cinema"],
+            },
+            recommendedFilter: {
+              type: Type.STRING,
+              enum: ["none", "vivid", "high_contrast", "warm", "cool", "noir"],
+            },
+            recommendedSpeed: { type: Type.NUMBER },
+            boostedViralityScore: { type: Type.NUMBER },
+            boostedHookScore: { type: Type.NUMBER },
+            boostedFlowScore: { type: Type.NUMBER },
+            hashtags: { type: Type.ARRAY, items: { type: Type.STRING } },
+            captions: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  start: { type: Type.NUMBER },
+                  end: { type: Type.NUMBER },
+                  text: { type: Type.STRING },
+                  emphasisWord: { type: Type.STRING },
+                },
+                required: ["start", "end", "text"],
+              },
+            },
+          },
+          required: [
+            "improvedTitle",
+            "improvedHook",
+            "improvedReason",
+            "retentionCritique",
+            "recommendedStartTime",
+            "recommendedEndTime",
+            "recommendedFraming",
+            "recommendedCaptionPreset",
+            "recommendedFilter",
+            "recommendedSpeed",
+            "boostedViralityScore",
+            "boostedHookScore",
+            "boostedFlowScore",
+            "hashtags",
+            "captions",
+          ],
+        },
+      },
+    });
+
+    const parsed = JSON.parse(response.text || "{}");
+    const maxDur = Math.max(clipEnd, Number(fullDuration) || clipEnd);
+    const nextStart = Math.max(0, Math.min(maxDur - 5, Number(parsed.recommendedStartTime) ?? clipStart));
+    const nextEnd = Math.min(maxDur, Math.max(nextStart + 5, Number(parsed.recommendedEndTime) ?? clipEnd));
+    const targetSpan = Math.max(4, nextEnd - nextStart);
+
+    const rawCaps = Array.isArray(parsed.captions) && parsed.captions.length > 0 ? parsed.captions : clip.captions || [];
+    const normalizedCaptions = rawCaps.map((c: any, idx: number) => {
+      const text = String(c.text || "").trim();
+      const s = Math.max(0, Number(c.start) || (idx * targetSpan) / rawCaps.length);
+      const e = Math.max(s + 0.6, Math.min(targetSpan, Number(c.end) || ((idx + 1) * targetSpan) / rawCaps.length));
+      const tokens = text.split(/\s+/).filter(Boolean);
+      const step = (e - s) / Math.max(1, tokens.length);
+      return {
+        start: Number(s.toFixed(2)),
+        end: Number(e.toFixed(2)),
+        text,
+        emphasisWord: c.emphasisWord ? String(c.emphasisWord).trim() : undefined,
+        words: tokens.map((w: string, wi: number) => ({
+          w,
+          start: Number((s + wi * step).toFixed(2)),
+          end: Number((s + (wi + 1) * step).toFixed(2)),
+        })),
+      };
+    });
+
+    const allowedSpeeds = [1, 1.15, 1.25];
+    const recSpeed = allowedSpeeds.includes(Number(parsed.recommendedSpeed))
+      ? Number(parsed.recommendedSpeed)
+      : 1.15;
+
+    return res.json({
+      success: true,
+      improvedTitle: String(parsed.improvedTitle || clip.title).trim(),
+      improvedHook: String(parsed.improvedHook || clip.hook).trim(),
+      improvedReason: String(parsed.improvedReason || clip.reason).trim(),
+      retentionCritique: String(parsed.retentionCritique || "Tightened pacing and opening hook."),
+      recommendedStartTime: Number(nextStart.toFixed(1)),
+      recommendedEndTime: Number(nextEnd.toFixed(1)),
+      recommendedFraming: parsed.recommendedFraming || clip.framingSuggestion || "smart_crop",
+      recommendedCaptionPreset: parsed.recommendedCaptionPreset || "opus_box",
+      recommendedFilter: parsed.recommendedFilter || "vivid",
+      recommendedSpeed: recSpeed,
+      boostedViralityScore: Math.max(70, Math.min(99, Math.round(Number(parsed.boostedViralityScore) || 95))),
+      boostedHookScore: Math.max(70, Math.min(99, Math.round(Number(parsed.boostedHookScore) || 96))),
+      boostedFlowScore: Math.max(70, Math.min(99, Math.round(Number(parsed.boostedFlowScore) || 94))),
+      hashtags: Array.isArray(parsed.hashtags) && parsed.hashtags.length > 0 ? parsed.hashtags.slice(0, 6) : clip.hashtags,
+      captions: normalizedCaptions,
+    });
+  } catch (error: any) {
+    console.error("AI optimize clip error:", error);
+    const formatted = formatGeminiHttpError(error);
+    return res.status(formatted.status).json({ error: formatted.message, code: formatted.code });
   }
 });
 

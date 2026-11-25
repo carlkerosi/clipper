@@ -112,6 +112,16 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
     }
   }, [activeClip.id, activeClip.startTime, isClipOnlyMode, isYoutubeEmbedMode, activeVideoSource]);
 
+  // Sync video playbackRate live
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const speed = Math.max(0.75, Math.min(1.5, Number(settings.playbackSpeed) || 1));
+    if (video.playbackRate !== speed) {
+      video.playbackRate = speed;
+    }
+  }, [settings.playbackSpeed, activeVideoSource]);
+
   // Main Canvas Rendering animation loop
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -127,11 +137,12 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
     const render = (now: number) => {
       const dt = Math.min(0.1, Math.max(0, (now - lastTs) / 1000));
       lastTs = now;
+      const speed = Math.max(0.75, Math.min(1.5, Number(settings.playbackSpeed) || 1));
 
       let relTime = 0;
       if (isYoutubeEmbedMode) {
         if (isPlaying) {
-          embedRelTimeRef.current += dt;
+          embedRelTimeRef.current += dt * speed;
           if (embedRelTimeRef.current >= clipDuration) {
             if (isLooping) {
               embedRelTimeRef.current = 0;
@@ -147,6 +158,9 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
           onTimeUpdate(activeClip.startTime + relTime);
         }
       } else if (video && video.readyState >= 1) {
+        if (video.playbackRate !== speed) {
+          video.playbackRate = speed;
+        }
         relTime = isClipOnlyMode
           ? video.currentTime
           : Math.max(0, video.currentTime - activeClip.startTime);
@@ -206,6 +220,7 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
         progressBarColor: settings.progressBarColor,
         showSafeZones,
         overlayOnly: !useFullCanvasComposite,
+        videoFilterCss: getCssFilterString(settings),
       });
 
       animId = requestAnimationFrame(render);
@@ -464,9 +479,6 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
             className={`absolute inset-0 w-full h-full object-cover z-10 ${
               useCanvasVideoComposite ? 'cursor-pointer pointer-events-auto' : 'pointer-events-none'
             }`}
-            style={{
-              filter: useCanvasVideoComposite ? videoCssFilter : undefined,
-            }}
           />
 
           {videoError && (

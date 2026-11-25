@@ -149,6 +149,8 @@ export interface ExportSettings {
   filterBrightness?: number;
   filterContrast?: number;
   filterSaturate?: number;
+  playbackSpeed?: number; // e.g. 0.85, 1, 1.15, 1.25, 1.5
+  normalizeAudio?: boolean; // Broadcast -14 LUFS loudness normalization & voice clarity EQ
 }
 
 export type SocialPlatform = 'shorts' | 'tiktok';

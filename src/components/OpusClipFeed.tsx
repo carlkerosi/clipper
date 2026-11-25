@@ -20,6 +20,7 @@ import {
   ArrowUpDown,
   Highlighter,
   Hash,
+  Zap,
 } from 'lucide-react';
 import {
   ClipHighlight,
@@ -30,6 +31,7 @@ import {
 } from '../types';
 import { generateSrtFile, downloadBlob } from '../utils/exportVideo';
 import { formatCaptionCase } from '../utils/captionRenderer';
+import { getCssFilterString } from '../utils/videoFilters';
 import {
   ExportPlatform,
   PLATFORM_PRESETS,
@@ -98,6 +100,8 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
     Record<string, { platform: ExportPlatform; filename: string; captionCopied: boolean }>
   >({});
   const [reclippingId, setReclippingId] = useState<string | null>(null);
+  const [aiBoostingId, setAiBoostingId] = useState<string | null>(null);
+  const [boostNotes, setBoostNotes] = useState<Record<string, string>>({});
   const [videoErrors, setVideoErrors] = useState<Record<string, string>>({});
 
   // Gemini AI Social Pack modal state
@@ -353,6 +357,14 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
           captionTextCase: settings.captionTextCase,
           captionOutlineWidth: settings.captionOutlineWidth,
           captionDropShadow: settings.captionDropShadow,
+          videoFilter: settings.videoFilter || 'none',
+          filterBrightness: settings.filterBrightness ?? 100,
+          filterContrast: settings.filterContrast ?? 100,
+          filterSaturate: settings.filterSaturate ?? 100,
+          playbackSpeed: settings.playbackSpeed ?? 1,
+          normalizeAudio: Boolean(settings.normalizeAudio),
+          showHookBanner: Boolean(settings.showHookBanner),
+          hookBannerText: settings.hookBannerText || clip.hook,
         }),
       });
 
@@ -467,6 +479,63 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
       setSocialError(err.message || 'Could not generate AI social pack');
     } finally {
       setIsGeneratingSocial(false);
+    }
+  };
+
+  const handleAiBoostClip = async (clip: ClipHighlight) => {
+    if (aiBoostingId) return;
+    setAiBoostingId(clip.id);
+    try {
+      const res = await fetch('/api/ai-optimize-clip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clip,
+          videoTitle: videoSource.title,
+          fullDuration: videoSource.duration,
+          transcript: videoSource.transcript,
+        }),
+      });
+      const data = await parseJsonResponse(res, 'AI retention boost failed');
+      if (!res.ok) {
+        throw new Error(data.error || 'AI retention boost failed');
+      }
+      const updatedClip: ClipHighlight = {
+        ...clip,
+        title: data.improvedTitle || clip.title,
+        hook: data.improvedHook || clip.hook,
+        reason: data.improvedReason || clip.reason,
+        startTime:
+          typeof data.recommendedStartTime === 'number'
+            ? data.recommendedStartTime
+            : clip.startTime,
+        endTime:
+          typeof data.recommendedEndTime === 'number'
+            ? data.recommendedEndTime
+            : clip.endTime,
+        viralityScore: data.boostedViralityScore || clip.viralityScore,
+        hookScore: data.boostedHookScore || clip.hookScore,
+        flowScore: data.boostedFlowScore || clip.flowScore,
+        framingSuggestion: data.recommendedFraming || clip.framingSuggestion,
+        hashtags: Array.isArray(data.hashtags) ? data.hashtags : clip.hashtags,
+        captions: Array.isArray(data.captions) && data.captions.length > 0 ? data.captions : clip.captions,
+      };
+      if (onClipUpdated) {
+        onClipUpdated(updatedClip);
+      }
+      if (data.retentionCritique) {
+        setBoostNotes((prev) => ({
+          ...prev,
+          [clip.id]: `${data.retentionCritique} (Recommended: ${data.recommendedCaptionPreset}, ${data.recommendedSpeed}x speed, ${data.recommendedFilter} grade)`,
+        }));
+      }
+    } catch (err: any) {
+      setVideoErrors((prev) => ({
+        ...prev,
+        [clip.id]: err?.message || 'AI Boost failed',
+      }));
+    } finally {
+      setAiBoostingId(null);
     }
   };
 
@@ -778,6 +847,7 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
                       preload="metadata"
                       onLoadedMetadata={(e) => {
                         const v = e.currentTarget;
+                        v.playbackRate = Math.max(0.75, Math.min(1.5, Number(settings.playbackSpeed) || 1));
                         if (!isPreClipped && clip.startTime > 0 && v.currentTime < clip.startTime) {
                           try {
                             v.currentTime = clip.startTime;
@@ -793,6 +863,10 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
                       }}
                       onTimeUpdate={(e) => {
                         const v = e.currentTarget;
+                        const targetSpeed = Math.max(0.75, Math.min(1.5, Number(settings.playbackSpeed) || 1));
+                        if (v.playbackRate !== targetSpeed) {
+                          v.playbackRate = targetSpeed;
+                        }
                         setPlayheadMap((prev) => ({ ...prev, [clip.id]: v.currentTime }));
                         if (isPreClipped) {
                           if (v.duration && v.currentTime >= v.duration - 0.15) {
@@ -805,6 +879,7 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
                         }
                       }}
                       className="w-full h-full object-cover"
+                      style={{ filter: getCssFilterString(settings) }}
                     />
                   </div>
                 ) : ytId ? (
@@ -1247,11 +1322,25 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
 
                     <div className="flex items-center gap-3 text-xs text-zinc-400">
                       <button
+                        onClick={() => handleAiBoostClip(clip)}
+                        disabled={aiBoostingId === clip.id}
+                        className="flex items-center gap-1 text-amber-400 hover:text-amber-300 font-medium transition-colors cursor-pointer disabled:opacity-50"
+                        title="Optimize hook, trim, score & captions with Gemini AI"
+                      >
+                        {aiBoostingId === clip.id ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Zap className="w-3.5 h-3.5" />
+                        )}
+                        <span>{aiBoostingId === clip.id ? 'Boosting...' : 'AI Boost'}</span>
+                      </button>
+
+                      <button
                         onClick={() => handleOpenSocialPack(clip)}
                         className="flex items-center gap-1 text-violet-400 hover:text-violet-300 font-medium transition-colors cursor-pointer"
                       >
                         <Share2 className="w-3.5 h-3.5" />
-                        <span>AI Social Copy</span>
+                        <span>Social Copy</span>
                       </button>
 
                       <button
@@ -1266,7 +1355,7 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
                         ) : (
                           <>
                             <Copy className="w-3.5 h-3.5" />
-                            <span>Copy Description</span>
+                            <span>Copy</span>
                           </>
                         )}
                       </button>
@@ -1280,6 +1369,13 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
                       </button>
                     </div>
                   </div>
+
+                  {boostNotes[clip.id] && (
+                    <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-200">
+                      <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+                      <span>{boostNotes[clip.id]}</span>
+                    </div>
+                  )}
 
                   {quickExportDone[clip.id] && (
                     <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-lg bg-emerald-500/10 border border-emerald-500/25 text-[11px]">

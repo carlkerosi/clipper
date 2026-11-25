@@ -176,7 +176,7 @@ service cloud.firestore {
           incoming().updatedAt == request.time &&
           (
             incoming().diff(existing()).affectedKeys().hasOnly([
-              'displayName', 'profileUrl', 'avatarUrl', 'connectionType',
+              'handle', 'displayName', 'profileUrl', 'avatarUrl', 'connectionType',
               'followersCount', 'postsCount', 'notes', 'lastSyncedAt', 'updatedAt'
             ]) ||
             incoming().diff(existing()).affectedKeys().hasOnly(['isDefault', 'updatedAt'])

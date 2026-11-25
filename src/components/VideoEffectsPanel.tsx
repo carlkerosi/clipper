@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Palette, RotateCcw, Check, Sun, Contrast, Droplets, Sparkles, Loader2, AlertCircle } from 'lucide-react';
+import { Palette, RotateCcw, Check, Sun, Contrast, Droplets, Sparkles, Loader2, AlertCircle, Gauge, Volume2 } from 'lucide-react';
 import { ExportSettings, VideoFilterPreset } from '../types';
 import { VIDEO_FILTER_PRESETS, getCssFilterString } from '../utils/videoFilters';
 import { parseJsonResponse } from '../utils/safeFetchJson';
@@ -31,13 +31,17 @@ export const VideoEffectsPanel: React.FC<VideoEffectsPanelProps> = ({
   const brightness = settings.filterBrightness ?? 100;
   const contrast = settings.filterContrast ?? 100;
   const saturate = settings.filterSaturate ?? 100;
+  const playbackSpeed = settings.playbackSpeed ?? 1;
+  const normalizeAudio = Boolean(settings.normalizeAudio);
   const activeCssFilter = getCssFilterString(settings);
 
   const isDefault =
     activePreset === 'none' &&
     brightness === 100 &&
     contrast === 100 &&
-    saturate === 100;
+    saturate === 100 &&
+    playbackSpeed === 1 &&
+    !normalizeAudio;
 
   const handleResetAll = () => {
     setGradeNote(null);
@@ -47,6 +51,8 @@ export const VideoEffectsPanel: React.FC<VideoEffectsPanelProps> = ({
       filterBrightness: 100,
       filterContrast: 100,
       filterSaturate: 100,
+      playbackSpeed: 1,
+      normalizeAudio: false,
     });
   };
 
@@ -93,8 +99,8 @@ export const VideoEffectsPanel: React.FC<VideoEffectsPanelProps> = ({
         <div className="flex items-center gap-2">
           <Palette className="w-4 h-4 text-violet-400" />
           <div>
-            <h3 className="text-xs font-semibold text-zinc-200">Video Effects & Color</h3>
-            <div className="text-[11px] text-zinc-500">Live CSS color grading & AI Vision</div>
+            <h3 className="text-xs font-semibold text-zinc-200">Effects, Pacing & Audio</h3>
+            <div className="text-[11px] text-zinc-500">Baked into Studio & MP4 exports</div>
           </div>
         </div>
 
@@ -259,6 +265,63 @@ export const VideoEffectsPanel: React.FC<VideoEffectsPanelProps> = ({
             className="w-full accent-violet-500 h-1 bg-zinc-800 rounded-lg cursor-pointer"
           />
         </div>
+      </div>
+
+      {/* Pacing Speed & Broadcast Audio Mastering */}
+      <div className="pt-3 border-t border-zinc-800 space-y-3.5">
+        <div className="space-y-2">
+          <div className="flex items-center justify-between text-xs">
+            <span className="flex items-center gap-1.5 font-medium text-zinc-300">
+              <Gauge className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Retention Pacing Speed</span>
+            </span>
+            <span className="font-mono text-[11px] text-emerald-400">
+              {playbackSpeed}x
+            </span>
+          </div>
+          <div className="grid grid-cols-5 gap-1.5">
+            {[
+              { val: 0.85, label: '0.85x' },
+              { val: 1, label: '1.0x' },
+              { val: 1.15, label: '1.15x' },
+              { val: 1.25, label: '1.25x' },
+              { val: 1.5, label: '1.5x' },
+            ].map((sp) => (
+              <button
+                key={sp.val}
+                type="button"
+                onClick={() => onUpdateSettings({ playbackSpeed: sp.val })}
+                className={`py-1.5 rounded-lg text-[11px] font-mono border transition-colors cursor-pointer ${
+                  playbackSpeed === sp.val
+                    ? 'bg-emerald-500/15 border-emerald-500 text-emerald-300 font-semibold'
+                    : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                }`}
+              >
+                {sp.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <label className="flex items-center justify-between gap-3 p-3 rounded-xl bg-zinc-950/70 border border-zinc-800 cursor-pointer hover:border-zinc-700 transition-colors">
+          <div className="flex items-start gap-2.5 min-w-0">
+            <Volume2 className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <div className="text-xs font-medium text-zinc-200">
+                Broadcast Audio Mastering
+              </div>
+              <div className="text-[10px] text-zinc-500">
+                FFmpeg dynamic loudness boost + 85Hz voice clarity filter
+              </div>
+            </div>
+          </div>
+          <input
+            type="checkbox"
+            checked={normalizeAudio}
+            onChange={(e) => onUpdateSettings({ normalizeAudio: e.target.checked })}
+            className="accent-emerald-500 w-4 h-4 cursor-pointer shrink-0"
+          />
+        </label>
       </div>
     </div>
   );

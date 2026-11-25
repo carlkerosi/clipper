@@ -47,6 +47,90 @@ export const PLATFORM_PRESETS: Record<ExportPlatform, PlatformPresetConfig> = {
   },
 };
 
+export function normalizeSocialProfileUrl(url?: string): string {
+  const trimmed = (url || '').trim().slice(0, 500);
+  if (!trimmed) return '';
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (/^(www\.)?(youtube\.com|youtu\.be|tiktok\.com)\//i.test(trimmed)) {
+    return `https://${trimmed}`;
+  }
+  return '';
+}
+
+export function parseSocialHandleAndUrl(
+  platform: ExportPlatform,
+  rawInput: string,
+  explicitProfileUrl?: string
+): {
+  handle: string;
+  bareHandle: string;
+  displayName: string;
+  profileUrl: string;
+} {
+  const trimmed = (rawInput || '').trim();
+  const baseDomain =
+    platform === 'shorts' ? 'https://www.youtube.com' : 'https://www.tiktok.com';
+
+  let bareHandle = '';
+  let inferredUrl = '';
+
+  const maybeUrl =
+    /^https?:\/\//i.test(trimmed)
+      ? trimmed
+      : /^(www\.)?(youtube\.com|youtu\.be|tiktok\.com)\//i.test(trimmed)
+        ? `https://${trimmed}`
+        : '';
+
+  if (maybeUrl) {
+    try {
+      const parsed = new URL(maybeUrl);
+      const segments = parsed.pathname.split('/').filter(Boolean);
+      const firstSeg = segments[0] || '';
+      const secondSeg = segments[1] || '';
+
+      if (firstSeg.startsWith('@')) {
+        bareHandle = firstSeg.replace(/^@+/, '');
+        inferredUrl = `${parsed.origin}/@${bareHandle}`;
+      } else if (
+        (firstSeg === 'c' || firstSeg === 'user' || firstSeg === 'channel') &&
+        secondSeg
+      ) {
+        bareHandle = secondSeg.replace(/^@+/, '');
+        inferredUrl = `${parsed.origin}/${firstSeg}/${secondSeg}`;
+      } else if (firstSeg) {
+        bareHandle = firstSeg.replace(/^@+/, '');
+        inferredUrl = `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, '');
+      }
+    } catch {
+      // Fallback to raw string cleanup below
+    }
+  }
+
+  if (!bareHandle) {
+    bareHandle = trimmed
+      .replace(/^@+/, '')
+      .replace(/\s+/g, '')
+      .replace(/[^a-zA-Z0-9._-]/g, '')
+      .slice(0, 90);
+  }
+
+  const safeBare = bareHandle.slice(0, 95) || 'creator';
+  const handle = `@${safeBare}`.slice(0, 100);
+  const explicitClean = normalizeSocialProfileUrl(explicitProfileUrl);
+  const defaultProfileUrl = `${baseDomain}/@${safeBare}`.slice(0, 500);
+  const profileUrl = explicitClean || inferredUrl || defaultProfileUrl;
+
+  const displayName =
+    (!maybeUrl && trimmed.replace(/^@+/, '').trim()) || safeBare;
+
+  return {
+    handle,
+    bareHandle: safeBare,
+    displayName: displayName.slice(0, 120),
+    profileUrl,
+  };
+}
+
 export function buildPlatformFilename(
   clip: ClipHighlight,
   platform: ExportPlatform,
@@ -154,6 +238,14 @@ export async function renderServerClipForPlatform(options: {
       captionTextCase: settings.captionTextCase,
       captionOutlineWidth: settings.captionOutlineWidth,
       captionDropShadow: settings.captionDropShadow,
+      videoFilter: settings.videoFilter || 'none',
+      filterBrightness: settings.filterBrightness ?? 100,
+      filterContrast: settings.filterContrast ?? 100,
+      filterSaturate: settings.filterSaturate ?? 100,
+      playbackSpeed: settings.playbackSpeed ?? 1,
+      normalizeAudio: Boolean(settings.normalizeAudio),
+      showHookBanner: Boolean(settings.showHookBanner),
+      hookBannerText: settings.hookBannerText || clip.hook,
     }),
   });
 
@@ -176,6 +268,90 @@ export async function renderServerClipForPlatform(options: {
     downloadUrl: data.downloadUrl,
     filename,
     blob,
+    captionCopied,
+  };
+}
+
+export async function mergeSelectedClipsCompilation(options: {
+  clips: ClipHighlight[];
+  videoSource: VideoSource;
+  settings: ExportSettings;
+  platform: ExportPlatform;
+  resolution?: '1080p' | '720p';
+  burnCaptions?: boolean;
+  account?: Pick<SocialAccount, 'handle' | 'notes'> | null;
+}): Promise<{
+  downloadUrl: string;
+  filename: string;
+  blob: Blob;
+  duration: number;
+  clipCount: number;
+  captionCopied: boolean;
+}> {
+  const {
+    clips,
+    videoSource,
+    settings,
+    platform,
+    resolution = PLATFORM_PRESETS[platform].recommendedResolution,
+    burnCaptions = true,
+    account,
+  } = options;
+
+  const response = await fetch('/api/merge-clips', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      videoUrl: videoSource.videoUrl,
+      playableSourceUrl: videoSource.playableSourceUrl,
+      youtubeUrl: videoSource.youtubeUrl,
+      clips,
+      resolution,
+      framingMode: settings.framingMode || 'smart_crop',
+      panX: settings.panX,
+      burnCaptions,
+      captionColor: settings.captionColor,
+      captionBaseColor: settings.captionBaseColor,
+      captionPosition: settings.captionPosition,
+      captionFontSize: settings.captionFontSize,
+      captionFontFamily: settings.captionFontFamily,
+      captionTextCase: settings.captionTextCase,
+      captionOutlineWidth: settings.captionOutlineWidth,
+      captionDropShadow: settings.captionDropShadow,
+      videoFilter: settings.videoFilter || 'none',
+      filterBrightness: settings.filterBrightness ?? 100,
+      filterContrast: settings.filterContrast ?? 100,
+      filterSaturate: settings.filterSaturate ?? 100,
+      playbackSpeed: settings.playbackSpeed ?? 1,
+      normalizeAudio: settings.normalizeAudio ?? true,
+      title: videoSource.title || 'compilation',
+      platform,
+    }),
+  });
+
+  const data = await parseJsonResponse(response, 'Compilation merge failed');
+  if (!response.ok || !data.downloadUrl) {
+    throw new Error(data.error || `Compilation merge failed (${response.status})`);
+  }
+
+  const fileRes = await fetch(data.downloadUrl);
+  if (!fileRes.ok) {
+    throw new Error('Could not download merged compilation MP4.');
+  }
+  const blob = await fileRes.blob();
+  const filename = data.filename || `clipforge_${platform}_compilation.mp4`;
+  downloadBlob(blob, filename);
+
+  const captionCopied = clips[0]
+    ? await copyPlatformCaptionSilently(clips[0], platform, account)
+    : false;
+
+  return {
+    downloadUrl: data.downloadUrl,
+    filename,
+    blob,
+    duration: Number(data.duration) || 0,
+    clipCount: Number(data.clipCount) || clips.length,
     captionCopied,
   };
 }

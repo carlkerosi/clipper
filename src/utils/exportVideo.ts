@@ -36,6 +36,8 @@ export interface VideoExportOptions {
   hookBannerText: string;
   showProgressBar: boolean;
   progressBarColor: string;
+  videoFilterCss?: string;
+  playbackSpeed?: number;
   onProgress: (progress: number, statusText: string) => void;
 }
 
@@ -66,6 +68,8 @@ export async function exportVerticalVideo(options: VideoExportOptions): Promise<
     hookBannerText,
     showProgressBar,
     progressBarColor,
+    videoFilterCss = 'none',
+    playbackSpeed = 1,
     onProgress,
   } = options;
 
@@ -146,7 +150,10 @@ export async function exportVerticalVideo(options: VideoExportOptions): Promise<
     };
 
     // Prepare video playback
+    const safeSpeed = Math.max(0.75, Math.min(1.5, Number(playbackSpeed) || 1));
+    const prevRate = videoElement.playbackRate;
     videoElement.currentTime = startTime;
+    videoElement.playbackRate = safeSpeed;
     videoElement.muted = false; // keep audio playing for stream capture
 
     await new Promise<void>((res) => {
@@ -212,11 +219,13 @@ export async function exportVerticalVideo(options: VideoExportOptions): Promise<
         progressBarColor,
         showSafeZones: false,
         overlayOnly: false,
+        videoFilterCss,
       });
 
       if (currentSec >= endTime || videoElement.ended) {
         isExporting = false;
         videoElement.pause();
+        videoElement.playbackRate = prevRate || 1;
         onProgress(100, 'Encoding final vertical video package...');
         setTimeout(() => {
           recorder.stop();

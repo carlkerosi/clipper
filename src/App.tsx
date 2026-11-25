@@ -18,7 +18,7 @@ import { MonitoringDashboard } from './components/MonitoringDashboard';
 import { AddSocialAccountModal } from './components/AddSocialAccountModal';
 import { useFirebase } from './contexts/FirebaseContext';
 import { parseJsonResponse } from './utils/safeFetchJson';
-import { Sparkles, Sliders, FileText, ArrowLeft, RefreshCw, Loader2, Palette } from 'lucide-react';
+import { Sparkles, Sliders, FileText, ArrowLeft, RefreshCw, Loader2, Palette, Zap } from 'lucide-react';
 
 export default function App() {
   const [appMode, setAppMode] = useState<'generator' | 'feed' | 'studio' | 'dashboard'>('generator');
@@ -60,6 +60,8 @@ export default function App() {
     filterBrightness: 100,
     filterContrast: 100,
     filterSaturate: 100,
+    playbackSpeed: 1,
+    normalizeAudio: false,
   });
 
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
@@ -71,6 +73,7 @@ export default function App() {
   const [isDirectorOpen, setIsDirectorOpen] = useState(false);
   const [isAiScanning, setIsAiScanning] = useState(false);
   const [isReclippingStudio, setIsReclippingStudio] = useState(false);
+  const [aiBoostingClipId, setAiBoostingClipId] = useState<string | null>(null);
   const [rightPanelTab, setRightPanelTab] = useState<'style' | 'effects' | 'transcript'>('style');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
@@ -282,6 +285,14 @@ export default function App() {
           captionTextCase: settings.captionTextCase,
           captionOutlineWidth: settings.captionOutlineWidth,
           captionDropShadow: settings.captionDropShadow,
+          videoFilter: settings.videoFilter || 'none',
+          filterBrightness: settings.filterBrightness ?? 100,
+          filterContrast: settings.filterContrast ?? 100,
+          filterSaturate: settings.filterSaturate ?? 100,
+          playbackSpeed: settings.playbackSpeed ?? 1,
+          normalizeAudio: Boolean(settings.normalizeAudio),
+          showHookBanner: Boolean(settings.showHookBanner),
+          hookBannerText: settings.hookBannerText || activeClip.hook,
         }),
       });
       const data = await parseJsonResponse(res, 'Failed to re-clip segment');
@@ -293,11 +304,135 @@ export default function App() {
         clipVideoUrl: data.downloadUrl,
         downloadUrl: data.downloadUrl,
       });
-      showToast('Re-rendered 9:16 clip with updated trim and framing.');
+      showToast('Re-rendered 9:16 clip with updated trim, grade & pacing.');
     } catch (err: any) {
       showToast(err.message || 'Could not re-clip segment.');
     } finally {
       setIsReclippingStudio(false);
+    }
+  };
+
+  const handleCreateCustomClip = () => {
+    const total = Math.max(10, currentVideo.duration || 60);
+    const start = Math.max(0, Math.min(total - 8, Math.round(currentTime * 10) / 10));
+    const end = Math.min(total, Math.round((start + 25) * 10) / 10);
+    const dur = Math.max(5, end - start);
+    const newClip: ClipHighlight = {
+      id: `custom-${Date.now()}`,
+      title: `Custom Clip @ ${Math.floor(start / 60)}:${String(Math.floor(start % 60)).padStart(2, '0')}`,
+      hook: 'Watch until the end',
+      reason: 'Manually marked custom clip range from Studio timeline.',
+      category: 'highlight',
+      startTime: start,
+      endTime: end,
+      viralityScore: 90,
+      framingSuggestion: settings.framingMode,
+      panX: settings.panX,
+      emojis: ['🔥'],
+      hashtags: ['#shorts', '#viral'],
+      captions: [
+        {
+          start: 0,
+          end: Math.min(4, dur),
+          text: 'Edit these captions in the Dialogue tab',
+          emphasisWord: 'CAPTIONS',
+        },
+      ],
+    };
+    setCurrentVideo((prev) => ({
+      ...prev,
+      highlights: [newClip, ...prev.highlights],
+    }));
+    handleSelectClip(newClip);
+    showToast('Created custom clip at current playhead.');
+  };
+
+  const handleDuplicateClip = (clip: ClipHighlight) => {
+    const copy: ClipHighlight = {
+      ...clip,
+      id: `copy-${Date.now()}`,
+      title: `${clip.title} (Copy)`,
+      clipVideoUrl: undefined,
+      downloadUrl: undefined,
+    };
+    setCurrentVideo((prev) => ({
+      ...prev,
+      highlights: [copy, ...prev.highlights],
+    }));
+    handleSelectClip(copy);
+    showToast(`Duplicated "${clip.title}"`);
+  };
+
+  const handleDeleteClip = (clipId: string) => {
+    if (currentVideo.highlights.length <= 1) return;
+    const remaining = currentVideo.highlights.filter((h) => h.id !== clipId);
+    setCurrentVideo((prev) => ({
+      ...prev,
+      highlights: remaining,
+    }));
+    if (activeClip.id === clipId && remaining[0]) {
+      handleSelectClip(remaining[0]);
+    }
+    showToast('Removed clip from library.');
+  };
+
+  const handleStudioAiBoost = async (clip: ClipHighlight) => {
+    if (aiBoostingClipId) return;
+    setAiBoostingClipId(clip.id);
+    try {
+      const res = await fetch('/api/ai-optimize-clip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clip,
+          videoTitle: currentVideo.title,
+          fullDuration: currentVideo.duration,
+          transcript: currentVideo.transcript,
+        }),
+      });
+      const data = await parseJsonResponse(res, 'AI Retention Boost failed');
+      if (!res.ok) {
+        throw new Error(data.error || 'AI Retention Boost failed');
+      }
+      const updatedClip: ClipHighlight = {
+        ...clip,
+        title: data.improvedTitle || clip.title,
+        hook: data.improvedHook || clip.hook,
+        reason: data.improvedReason || clip.reason,
+        startTime:
+          typeof data.recommendedStartTime === 'number'
+            ? data.recommendedStartTime
+            : clip.startTime,
+        endTime:
+          typeof data.recommendedEndTime === 'number'
+            ? data.recommendedEndTime
+            : clip.endTime,
+        viralityScore: data.boostedViralityScore || clip.viralityScore,
+        hookScore: data.boostedHookScore || clip.hookScore,
+        flowScore: data.boostedFlowScore || clip.flowScore,
+        framingSuggestion: data.recommendedFraming || clip.framingSuggestion,
+        hashtags: Array.isArray(data.hashtags) ? data.hashtags : clip.hashtags,
+        captions:
+          Array.isArray(data.captions) && data.captions.length > 0
+            ? data.captions
+            : clip.captions,
+      };
+      handleClipUpdated(updatedClip);
+      if (clip.id === activeClip.id) {
+        handleUpdateSettings({
+          hookBannerText: updatedClip.hook,
+          showHookBanner: true,
+          captionPreset: data.recommendedCaptionPreset || settings.captionPreset,
+          videoFilter: data.recommendedFilter || settings.videoFilter,
+          playbackSpeed: data.recommendedSpeed || settings.playbackSpeed,
+          framingMode: data.recommendedFraming || settings.framingMode,
+        });
+      }
+      showToast(data.retentionCritique || 'AI Retention Boost applied!');
+    } catch (err: any) {
+      showToast(err?.message || 'AI Retention Boost failed.');
+    } finally {
+      setAiBoostingClipId(null);
     }
   };
 
@@ -700,6 +835,10 @@ export default function App() {
             : undefined
         }
         onOpenAiDirector={() => setIsDirectorOpen(true)}
+        onOpenAddSocialModal={() => {
+          setAccountModalPlatform('shorts');
+          setIsAccountModalOpen(true);
+        }}
       />
 
       {/* Main Workspace Body */}
@@ -775,17 +914,31 @@ export default function App() {
                 <span>Back to All Clips ({currentVideo.highlights.length})</span>
               </button>
 
-              <div className="flex items-center gap-3">
+              <div className="flex flex-wrap items-center gap-2.5">
                 <div className="text-xs text-zinc-400 flex items-center gap-2 max-w-md truncate">
                   <span>Active Clip:</span>
                   <span className="text-zinc-200 font-semibold truncate">{activeClip.title}</span>
                 </div>
 
                 <button
+                  onClick={() => handleStudioAiBoost(activeClip)}
+                  disabled={aiBoostingClipId === activeClip.id}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/35 text-xs font-semibold transition-colors cursor-pointer disabled:opacity-50"
+                  title="Audit and boost hook, timing, captions & styling with Gemini AI"
+                >
+                  {aiBoostingClipId === activeClip.id ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Zap className="w-3.5 h-3.5" />
+                  )}
+                  <span>{aiBoostingClipId === activeClip.id ? 'Boosting...' : 'AI Boost Clip'}</span>
+                </button>
+
+                <button
                   onClick={handleReclipInStudio}
                   disabled={isReclippingStudio}
                   className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-xs font-medium transition-colors cursor-pointer disabled:opacity-50"
-                  title="Re-render 9:16 MP4 with current trim & framing"
+                  title="Re-render 9:16 MP4 with current trim, grade, speed & framing"
                 >
                   {isReclippingStudio ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin text-violet-400" />
@@ -814,6 +967,11 @@ export default function App() {
                       appendExisting: true,
                     })
                   }
+                  onCreateCustomClip={handleCreateCustomClip}
+                  onDuplicateClip={handleDuplicateClip}
+                  onDeleteClip={handleDeleteClip}
+                  onAiBoostClip={handleStudioAiBoost}
+                  aiBoostingClipId={aiBoostingClipId}
                   isAiScanning={isAiScanning}
                 />
               </section>

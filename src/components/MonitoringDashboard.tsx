@@ -507,94 +507,67 @@ export const MonitoringDashboard: React.FC<MonitoringDashboardProps> = ({
           <p className="text-xs text-zinc-400">
             {user
               ? `Synced to ${user.email || user.displayName || 'your account'} · Every export and post update persists automatically.`
-              : 'Sign in with Google to save your YouTube Shorts and TikTok accounts and track exported clips across sessions.'}
+              : 'Saved locally in your browser — add YouTube Shorts & TikTok accounts manually anytime, or sign in with Google to cloud-sync.'}
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+          <button
+            type="button"
+            onClick={() => openAddAccount('shorts')}
+            className="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>Add Social Account</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setLogModalOpen(true)}
+            className="px-3.5 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border border-zinc-700 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+          >
+            <BarChart3 className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Log Clip Post</span>
+          </button>
+
           {user ? (
-            <>
-              <button
-                type="button"
-                onClick={() => openAddAccount('shorts')}
-                className="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Add Social Account</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setLogModalOpen(true)}
-                className="px-3.5 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border border-zinc-700 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
-              >
-                <BarChart3 className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Log Clip Post</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={signOutUser}
-                className="px-3 py-2 rounded-lg bg-zinc-950 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 border border-zinc-800 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
-                title="Sign out"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>Sign Out</span>
-              </button>
-            </>
+            <button
+              type="button"
+              onClick={signOutUser}
+              className="px-3 py-2 rounded-lg bg-zinc-950 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 border border-zinc-800 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+              title="Sign out"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Sign Out</span>
+            </button>
           ) : (
             <button
               type="button"
               onClick={signInWithGoogle}
               disabled={isSigningIn}
-              className="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-60"
+              className="px-3 py-2 rounded-lg bg-zinc-950 hover:bg-zinc-800 text-emerald-400 hover:text-emerald-300 border border-zinc-800 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap disabled:opacity-60"
+              title="Optional: sync local accounts across devices"
             >
               {isSigningIn ? (
                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
               ) : (
                 <LogIn className="w-3.5 h-3.5" />
               )}
-              <span>Sign in with Google to Sync</span>
+              <span>Google Sync</span>
             </button>
           )}
         </div>
       </div>
 
       {authError && (
-        <div className="px-4 py-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-300">
-          {authError}
+        <div className="px-4 py-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-200 flex items-center justify-between gap-2">
+          <span>
+            Google Sync unavailable ({authError}) — your accounts are still saved locally without interruption.
+          </span>
         </div>
       )}
 
-      {!user ? (
-        <div className="p-8 rounded-xl bg-zinc-900/60 border border-zinc-800 flex flex-col items-center text-center space-y-4">
-          <div className="w-11 h-11 rounded-xl bg-zinc-950 border border-zinc-800 flex items-center justify-center text-emerald-400">
-            <BarChart3 className="w-5 h-5" />
-          </div>
-          <div className="space-y-1.5 max-w-md">
-            <h2 className="text-base font-semibold text-zinc-100">
-              Connect your creator workspace
-            </h2>
-            <p className="text-xs text-zinc-400 leading-relaxed">
-              Sign in with Google to add your respective YouTube Shorts and TikTok accounts, route 1-click exports to your default channels, and monitor all views and engagement in one place.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={signInWithGoogle}
-            disabled={isSigningIn}
-            className="px-5 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-semibold inline-flex items-center gap-2 cursor-pointer"
-          >
-            {isSigningIn ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <LogIn className="w-4 h-4" />
-            )}
-            <span>Continue with Google</span>
-          </button>
-        </div>
-      ) : (
-        <>
+      <>
           {/* Section 1: 4-Column Portfolio KPI Strip */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="p-4 rounded-xl bg-zinc-900/75 border border-zinc-800 space-y-1">
@@ -1202,8 +1175,7 @@ export const MonitoringDashboard: React.FC<MonitoringDashboardProps> = ({
               </div>
             )}
           </section>
-        </>
-      )}
+      </>
 
       {/* Add / Edit Social Account Modal */}
       <AddSocialAccountModal

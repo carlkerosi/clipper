@@ -38,6 +38,7 @@ export interface RenderFrameOptions {
   progressBarColor?: string;
   showSafeZones?: boolean;
   overlayOnly?: boolean;
+  videoFilterCss?: string;
 }
 
 export function formatCaptionCase(text: string, textCase: CaptionTextCase = 'uppercase'): string {
@@ -88,6 +89,7 @@ export function drawVerticalFrame(options: RenderFrameOptions) {
     progressBarColor = '#EF4444',
     showSafeZones = false,
     overlayOnly = false,
+    videoFilterCss = 'none',
   } = options;
 
   if (overlayOnly) {
@@ -99,6 +101,7 @@ export function drawVerticalFrame(options: RenderFrameOptions) {
     if (videoElement && videoElement.readyState >= 2) {
       const vWidth = videoElement.videoWidth || 1920;
       const vHeight = videoElement.videoHeight || 1080;
+      const activeFilter = videoFilterCss && videoFilterCss !== 'none' ? videoFilterCss : 'none';
 
       if (framingMode === 'smart_crop') {
         const targetAspect = canvasWidth / canvasHeight;
@@ -115,6 +118,8 @@ export function drawVerticalFrame(options: RenderFrameOptions) {
         const cropX = Math.max(0, Math.min(vWidth - cropWidth, offsetX));
         const cropY = (vHeight - cropHeight) / 2;
 
+        ctx.save();
+        ctx.filter = activeFilter;
         ctx.drawImage(
           videoElement,
           cropX,
@@ -126,9 +131,12 @@ export function drawVerticalFrame(options: RenderFrameOptions) {
           canvasWidth,
           canvasHeight
         );
+        ctx.restore();
       } else if (framingMode === 'blur_fit') {
         ctx.save();
-        ctx.filter = 'blur(28px) brightness(0.4)';
+        ctx.filter = activeFilter === 'none'
+          ? 'blur(28px) brightness(0.4)'
+          : `blur(28px) brightness(0.4) ${activeFilter}`;
         ctx.drawImage(videoElement, -canvasWidth * 0.2, -canvasHeight * 0.1, canvasWidth * 1.4, canvasHeight * 1.2);
         ctx.restore();
 
@@ -137,6 +145,7 @@ export function drawVerticalFrame(options: RenderFrameOptions) {
         const targetY = (canvasHeight - targetH) / 2;
 
         ctx.save();
+        ctx.filter = activeFilter;
         ctx.shadowColor = 'rgba(0,0,0,0.6)';
         ctx.shadowBlur = 30;
         ctx.drawImage(videoElement, 0, targetY, targetW, targetH);
@@ -150,7 +159,10 @@ export function drawVerticalFrame(options: RenderFrameOptions) {
         const cropX = Math.max(0, Math.min(vWidth - cropW, maxOffX + (panX / 100) * maxOffX));
         const cropY = (vHeight - cropH) / 2;
 
+        ctx.save();
+        ctx.filter = activeFilter;
         ctx.drawImage(videoElement, cropX, cropY, cropW, cropH, 0, 0, canvasWidth, topHeight);
+        ctx.restore();
 
         ctx.fillStyle = '#22C55E';
         ctx.fillRect(0, topHeight - 3, canvasWidth, 6);
@@ -161,7 +173,10 @@ export function drawVerticalFrame(options: RenderFrameOptions) {
         const targetW = canvasWidth;
         const targetH = (canvasWidth / vWidth) * vHeight;
         const targetY = (canvasHeight - targetH) / 2;
+        ctx.save();
+        ctx.filter = activeFilter;
         ctx.drawImage(videoElement, 0, targetY, targetW, targetH);
+        ctx.restore();
       }
     } else {
       drawFallbackStudioBackground(ctx, canvasWidth, canvasHeight, currentTimeInClip);

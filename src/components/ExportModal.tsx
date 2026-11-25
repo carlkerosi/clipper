@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { ClipHighlight, ExportSettings, VideoSource } from '../types';
 import { exportVerticalVideo, generateSrtFile, downloadBlob } from '../utils/exportVideo';
+import { getCssFilterString } from '../utils/videoFilters';
 import { parseJsonResponse } from '../utils/safeFetchJson';
 import {
   ExportPlatform,
@@ -27,6 +28,7 @@ import {
   copyPlatformCaptionSilently,
   canNativeShareFiles,
   shareClipNatively,
+  mergeSelectedClipsCompilation,
 } from '../utils/platformExport';
 import { useFirebase } from '../contexts/FirebaseContext';
 
@@ -243,6 +245,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         captionTextCase: settings.captionTextCase,
         captionOutlineWidth: settings.captionOutlineWidth,
         captionDropShadow: settings.captionDropShadow,
+        videoFilter: settings.videoFilter || 'none',
+        filterBrightness: settings.filterBrightness ?? 100,
+        filterContrast: settings.filterContrast ?? 100,
+        filterSaturate: settings.filterSaturate ?? 100,
+        playbackSpeed: settings.playbackSpeed ?? 1,
+        normalizeAudio: Boolean(settings.normalizeAudio),
+        showHookBanner: Boolean(settings.showHookBanner),
+        hookBannerText: clip.id === activeClip.id ? settings.hookBannerText || clip.hook : clip.hook,
       }),
     });
 
@@ -321,6 +331,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       hookBannerText: clip.id === activeClip.id ? settings.hookBannerText || clip.hook : clip.hook,
       showProgressBar: settings.showProgressBar,
       progressBarColor: settings.progressBarColor,
+      videoFilterCss: getCssFilterString(settings),
+      playbackSpeed: settings.playbackSpeed ?? 1,
       onProgress: onClipProgress,
     });
 
@@ -616,6 +628,90 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         ? `Studio batch cancelled (${succeededClips.length}/${queue.length} rendered)`
         : `Completed ${succeededClips.length}/${queue.length} Studio renders`
     );
+  };
+
+  // Merge multiple selected clips into 1 seamless 9:16 compilation MP4
+  const handleMergeCompilation = async () => {
+    if (selectedClips.length < 2) return;
+    const targetPlatform = selectedPlatform;
+    const targetPreset = PLATFORM_PRESETS[targetPlatform];
+    const targetAccount = workspacePrefs.autoApplyAccounts
+      ? getDefaultAccountForPlatform(targetPlatform)
+      : undefined;
+
+    cancelBatchRef.current = false;
+    setIsExporting(true);
+    setBatchCompleted(false);
+    setExportProgress(18);
+    setExportStatusText(
+      `Stitching ${Math.min(6, selectedClips.length)} clips into 1 ${targetPreset.label} compilation MP4...`
+    );
+    setDownloadUrl(null);
+    setExportedBlob(null);
+    setExportedFilename('');
+    setBatchResults({});
+
+    try {
+      const merged = await mergeSelectedClipsCompilation({
+        clips: selectedClips,
+        videoSource,
+        settings,
+        platform: targetPlatform,
+        resolution,
+        burnCaptions: burnServerCaptions,
+        account: targetAccount,
+      });
+
+      setExportedBlob(merged.blob);
+      setExportedFilename(merged.filename);
+      setDownloadUrl(merged.downloadUrl);
+      if (merged.captionCopied) setCopiedCaption(true);
+
+      const leadClip = selectedClips[0];
+      setBatchResults({
+        [leadClip.id]: {
+          clip: {
+            ...leadClip,
+            title: `${videoSource.title} (${merged.clipCount}-Clip Compilation)`,
+          },
+          status: 'done',
+          blob: merged.blob,
+          filename: merged.filename,
+          downloadUrl: merged.downloadUrl,
+        },
+      });
+
+      logClipExport({
+        platform: targetPlatform,
+        clipId: `mashup_${Date.now()}`,
+        clipTitle: `${videoSource.title} (${merged.clipCount}-Clip Compilation)`,
+        sourceVideoTitle: videoSource.title,
+        filename: merged.filename,
+        captionCopy: buildPlatformSocialCopy(leadClip, targetPlatform, targetAccount),
+        durationSec: merged.duration || totalSelectedDuration,
+        viralityScore: Math.max(...selectedClips.map((c) => c.viralityScore)),
+        status: 'exported',
+        accountId: targetAccount?.id,
+        accountHandle: targetAccount?.handle,
+      }).catch(() => {});
+
+      setExportProgress(100);
+      setBatchCompleted(true);
+      setExportStatusText(`Merged ${merged.clipCount} clips into ${merged.filename}`);
+    } catch (err: any) {
+      const leadClip = selectedClips[0];
+      setBatchResults({
+        [leadClip.id]: {
+          clip: leadClip,
+          status: 'error',
+          error: err?.message || 'Compilation merge failed',
+        },
+      });
+      setBatchCompleted(true);
+      setExportStatusText(err?.message || 'Compilation merge failed');
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   const handleDownloadVideo = () => {
@@ -1115,6 +1211,19 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                     : `Quick Export for ${activePreset.label} (${resolution})`}
                 </span>
               </button>
+
+              {selectedClips.length > 1 && (
+                <button
+                  type="button"
+                  onClick={handleMergeCompilation}
+                  className="w-full py-2 px-3 bg-violet-600/20 hover:bg-violet-600/30 text-violet-200 font-semibold rounded-lg text-xs flex items-center justify-center gap-2 border border-violet-500/40 cursor-pointer transition-colors"
+                >
+                  <Layers className="w-3.5 h-3.5 text-violet-400" />
+                  <span>
+                    Merge {Math.min(6, selectedClips.length)} Selected into 1 Compilation MP4
+                  </span>
+                </button>
+              )}
 
               <div className="grid grid-cols-2 gap-2">
                 <button

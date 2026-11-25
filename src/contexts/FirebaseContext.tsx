@@ -36,6 +36,10 @@ import {
   VideoFilterPreset,
   WorkspacePreferences,
 } from '../types';
+import {
+  normalizeSocialProfileUrl,
+  parseSocialHandleAndUrl,
+} from '../utils/platformExport';
 
 export interface AddSocialAccountInput {
   platform: SocialPlatform;
@@ -106,6 +110,7 @@ interface FirebaseContextValue {
   isSigningIn: boolean;
   authError: string | null;
   isLoadingData: boolean;
+  isLocalWorkspace: boolean;
   socialAccounts: SocialAccount[];
   publishedClips: PublishedClipRecord[];
   workspacePrefs: WorkspacePreferences;
@@ -116,7 +121,7 @@ interface FirebaseContextValue {
   addSocialAccount: (input: AddSocialAccountInput) => Promise<SocialAccount>;
   updateSocialAccount: (
     accountId: string,
-    patch: Partial<Omit<AddSocialAccountInput, 'platform' | 'handle' | 'isDefault'>>
+    patch: Partial<Omit<AddSocialAccountInput, 'platform' | 'isDefault'>>
   ) => Promise<void>;
   setDefaultSocialAccount: (accountId: string, platform: SocialPlatform) => Promise<void>;
   removeSocialAccount: (accountId: string) => Promise<void>;
@@ -129,11 +134,32 @@ interface FirebaseContextValue {
 
 const FirebaseContext = createContext<FirebaseContextValue | undefined>(undefined);
 
+const LOCAL_ACCOUNTS_KEY = 'clipforge_local_accounts_v1';
+const LOCAL_CLIPS_KEY = 'clipforge_local_clips_v1';
+const LOCAL_PREFS_KEY = 'clipforge_local_prefs_v1';
+
+function loadLocalJson<T>(key: string, fallback: T): T {
+  if (typeof window === 'undefined') return fallback;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function saveLocalJson<T>(key: string, value: T): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
 function sanitizeHttpUrl(url?: string): string {
-  const trimmed = (url || '').trim().slice(0, 500);
-  if (!trimmed) return '';
-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  return '';
+  return normalizeSocialProfileUrl(url);
 }
 
 function sanitizeId(raw: string): string {
@@ -151,13 +177,13 @@ function sanitizeText(val: unknown, maxLen: number, fallback = ''): string {
   return (s || fallback).slice(0, maxLen);
 }
 
-function normalizeHandle(raw: string): string {
-  const cleaned = raw.trim().replace(/^@+/, '').slice(0, 95);
-  return cleaned ? `@${cleaned}` : '@creator';
-}
-
 function timestampToMs(ts: any): number {
   if (!ts) return 0;
+  if (typeof ts === 'number') return ts;
+  if (typeof ts === 'string') {
+    const parsed = Date.parse(ts);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
   if (typeof ts.toMillis === 'function') return ts.toMillis();
   if (typeof ts.seconds === 'number') return ts.seconds * 1000;
   return 0;
@@ -169,19 +195,33 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [isLoadingData, setIsLoadingData] = useState(false);
-  const [socialAccounts, setSocialAccounts] = useState<SocialAccount[]>([]);
-  const [publishedClips, setPublishedClips] = useState<PublishedClipRecord[]>([]);
-  const [workspacePrefs, setWorkspacePrefs] = useState<WorkspacePreferences>({
+  const [socialAccounts, setSocialAccounts] = useState<SocialAccount[]>(() =>
+    loadLocalJson<SocialAccount[]>(LOCAL_ACCOUNTS_KEY, []).filter(
+      (a) => a.platform === 'shorts' || a.platform === 'tiktok'
+    )
+  );
+  const [publishedClips, setPublishedClips] = useState<PublishedClipRecord[]>(() =>
+    loadLocalJson<PublishedClipRecord[]>(LOCAL_CLIPS_KEY, []).filter(
+      (c) => c.platform === 'shorts' || c.platform === 'tiktok'
+    )
+  );
+  const [workspacePrefs, setWorkspacePrefs] = useState<WorkspacePreferences>(() => ({
     id: 'workspace',
-    userId: '',
+    userId: 'local',
     ...DEFAULT_WORKSPACE_PREFS,
-  });
-  const [workspacePrefsLoaded, setWorkspacePrefsLoaded] = useState(false);
+    ...loadLocalJson<Partial<WorkspacePreferencesValues>>(LOCAL_PREFS_KEY, {}),
+  }));
+  const [workspacePrefsLoaded, setWorkspacePrefsLoaded] = useState(true);
 
   const profileReadyUidRef = useRef<string | null>(null);
   const hasWorkspacePrefsDocRef = useRef<boolean>(false);
+  const migratedLocalUidRef = useRef<string | null>(null);
   const workspacePrefsRef = useRef<WorkspacePreferences>(workspacePrefs);
   workspacePrefsRef.current = workspacePrefs;
+  const socialAccountsRef = useRef<SocialAccount[]>(socialAccounts);
+  socialAccountsRef.current = socialAccounts;
+  const publishedClipsRef = useRef<PublishedClipRecord[]>(publishedClips);
+  publishedClipsRef.current = publishedClips;
 
   const ensureUserDocument = useCallback(async (u: User) => {
     const userPath = `users/${u.uid}`;
@@ -240,14 +280,28 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!currentUser) {
         profileReadyUidRef.current = null;
         hasWorkspacePrefsDocRef.current = false;
-        setSocialAccounts([]);
-        setPublishedClips([]);
+        migratedLocalUidRef.current = null;
+
+        const localAccs = loadLocalJson<SocialAccount[]>(LOCAL_ACCOUNTS_KEY, []).filter(
+          (a) => a.platform === 'shorts' || a.platform === 'tiktok'
+        );
+        const localClips = loadLocalJson<PublishedClipRecord[]>(LOCAL_CLIPS_KEY, []).filter(
+          (c) => c.platform === 'shorts' || c.platform === 'tiktok'
+        );
+        const localPrefs = loadLocalJson<Partial<WorkspacePreferencesValues>>(
+          LOCAL_PREFS_KEY,
+          {}
+        );
+
+        setSocialAccounts(localAccs);
+        setPublishedClips(localClips);
         setWorkspacePrefs({
           id: 'workspace',
-          userId: '',
+          userId: 'local',
           ...DEFAULT_WORKSPACE_PREFS,
+          ...localPrefs,
         });
-        setWorkspacePrefsLoaded(false);
+        setWorkspacePrefsLoaded(true);
         setIsLoadingData(false);
         return;
       }
@@ -273,6 +327,102 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           list.sort((a, b) => timestampToMs(b.createdAt) - timestampToMs(a.createdAt));
           setSocialAccounts(list);
           setIsLoadingData(false);
+
+          // Automatically merge any manually added local accounts & clips once upon Google sign-in
+          if (migratedLocalUidRef.current !== currentUser.uid) {
+            migratedLocalUidRef.current = currentUser.uid;
+            const localAccounts = loadLocalJson<SocialAccount[]>(LOCAL_ACCOUNTS_KEY, []).filter(
+              (a) => a.platform === 'shorts' || a.platform === 'tiktok'
+            );
+            const localClips = loadLocalJson<PublishedClipRecord[]>(LOCAL_CLIPS_KEY, []).filter(
+              (c) => c.platform === 'shorts' || c.platform === 'tiktok'
+            );
+
+            if (localAccounts.length > 0 || localClips.length > 0) {
+              const existingKeys = new Set(
+                list.map((a) => `${a.platform}:${a.handle.toLowerCase()}`)
+              );
+              const existingAccountIds = new Set(list.map((a) => a.id));
+              const platformsWithDefault = new Set(
+                list.filter((a) => a.isDefault).map((a) => a.platform)
+              );
+
+              const batch = writeBatch(db);
+              let writeCount = 0;
+
+              localAccounts.forEach((acc) => {
+                const key = `${acc.platform}:${acc.handle.toLowerCase()}`;
+                if (existingKeys.has(key) || existingAccountIds.has(acc.id)) return;
+                existingKeys.add(key);
+                const parsed = parseSocialHandleAndUrl(acc.platform, acc.handle, acc.profileUrl);
+                const shouldBeDefault =
+                  acc.isDefault && !platformsWithDefault.has(acc.platform);
+                if (shouldBeDefault) platformsWithDefault.add(acc.platform);
+                const accId = sanitizeId(acc.id);
+                batch.set(doc(db, 'users', currentUser.uid, 'socialAccounts', accId), {
+                  id: accId,
+                  userId: currentUser.uid,
+                  platform: acc.platform,
+                  handle: sanitizeText(parsed.handle, 100, '@creator'),
+                  displayName: sanitizeText(acc.displayName, 120, parsed.displayName),
+                  profileUrl: sanitizeHttpUrl(acc.profileUrl) || parsed.profileUrl,
+                  avatarUrl: sanitizeHttpUrl(acc.avatarUrl),
+                  connectionType: (acc.connectionType || 'linked') as AccountConnectionType,
+                  isDefault: Boolean(shouldBeDefault),
+                  followersCount: sanitizeInt(acc.followersCount),
+                  postsCount: sanitizeInt(acc.postsCount, 10000000),
+                  notes: sanitizeText(acc.notes, 300, ''),
+                  lastSyncedAt: sanitizeText(acc.lastSyncedAt, 64, new Date().toISOString()),
+                  createdAt: serverTimestamp(),
+                  updatedAt: serverTimestamp(),
+                });
+                writeCount += 1;
+              });
+
+              localClips.slice(0, 100).forEach((rec) => {
+                const recId = sanitizeId(rec.id);
+                batch.set(doc(db, 'users', currentUser.uid, 'publishedClips', recId), {
+                  id: recId,
+                  userId: currentUser.uid,
+                  accountId: sanitizeText(rec.accountId, 128, 'unassigned'),
+                  accountHandle: sanitizeText(rec.accountHandle, 100, 'No account linked'),
+                  platform: rec.platform,
+                  clipId: sanitizeId(rec.clipId || 'clip'),
+                  clipTitle: sanitizeText(rec.clipTitle, 200, 'Untitled Short'),
+                  sourceVideoTitle: sanitizeText(rec.sourceVideoTitle, 200, ''),
+                  filename: sanitizeText(rec.filename, 200, 'clip.mp4'),
+                  captionCopy: sanitizeText(rec.captionCopy, 2000, ''),
+                  status: (rec.status || 'exported') as ClipPublishStatus,
+                  postUrl: sanitizeHttpUrl(rec.postUrl),
+                  scheduledFor: sanitizeText(rec.scheduledFor, 64, ''),
+                  views: sanitizeInt(rec.views),
+                  likes: sanitizeInt(rec.likes),
+                  comments: sanitizeInt(rec.comments),
+                  shares: sanitizeInt(rec.shares),
+                  durationSec: sanitizeInt(rec.durationSec, 600),
+                  viralityScore: sanitizeInt(rec.viralityScore, 100),
+                  createdAt: serverTimestamp(),
+                  updatedAt: serverTimestamp(),
+                });
+                writeCount += 1;
+              });
+
+              if (writeCount > 0) {
+                batch
+                  .commit()
+                  .then(() => {
+                    saveLocalJson(LOCAL_ACCOUNTS_KEY, []);
+                    saveLocalJson(LOCAL_CLIPS_KEY, []);
+                  })
+                  .catch((err) => {
+                    console.warn('Could not sync local accounts to cloud yet:', err);
+                  });
+              } else {
+                saveLocalJson(LOCAL_ACCOUNTS_KEY, []);
+                saveLocalJson(LOCAL_CLIPS_KEY, []);
+              }
+            }
+          }
         },
         (error) => {
           setIsLoadingData(false);
@@ -399,31 +549,30 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const addSocialAccount = useCallback(
     async (input: AddSocialAccountInput): Promise<SocialAccount> => {
       const currentUser = auth.currentUser;
-      if (!currentUser) {
-        throw new Error('Please sign in first to save social media accounts.');
-      }
-      if (profileReadyUidRef.current !== currentUser.uid) {
-        await ensureUserDocument(currentUser);
-      }
-
-      const id = sanitizeId(`acc_${input.platform}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
-      const existingOnPlatform = socialAccounts.filter((a) => a.platform === input.platform);
+      const id = sanitizeId(
+        `acc_${input.platform}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+      );
+      const currentAccounts = socialAccountsRef.current;
+      const existingOnPlatform = currentAccounts.filter((a) => a.platform === input.platform);
       const shouldBeDefault = input.isDefault ?? existingOnPlatform.length === 0;
-      const handle = normalizeHandle(input.handle);
-      const cleanHandleNoAt = handle.replace(/^@/, '');
 
-      const defaultProfileUrl =
-        input.platform === 'shorts'
-          ? `https://www.youtube.com/@${cleanHandleNoAt}`
-          : `https://www.tiktok.com/@${cleanHandleNoAt}`;
+      const parsed = parseSocialHandleAndUrl(
+        input.platform,
+        input.handle,
+        input.profileUrl
+      );
 
-      const payload = {
+      const basePayload = {
         id,
-        userId: currentUser.uid,
+        userId: currentUser?.uid || 'local',
         platform: input.platform,
-        handle: sanitizeText(handle, 100, '@creator'),
-        displayName: sanitizeText(input.displayName, 120, cleanHandleNoAt || 'Creator Account'),
-        profileUrl: sanitizeHttpUrl(input.profileUrl) || defaultProfileUrl,
+        handle: sanitizeText(parsed.handle, 100, '@creator'),
+        displayName: sanitizeText(
+          input.displayName,
+          120,
+          parsed.displayName || parsed.bareHandle || 'Creator Account'
+        ),
+        profileUrl: sanitizeHttpUrl(input.profileUrl) || parsed.profileUrl,
         avatarUrl: sanitizeHttpUrl(input.avatarUrl),
         connectionType: (input.connectionType || 'linked') as AccountConnectionType,
         isDefault: Boolean(shouldBeDefault),
@@ -431,6 +580,54 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         postsCount: sanitizeInt(input.postsCount, 10000000),
         notes: sanitizeText(input.notes, 300, ''),
         lastSyncedAt: sanitizeText(input.lastSyncedAt, 64, new Date().toISOString()),
+      };
+
+      // Local Workspace Fallback (instant, zero login required)
+      if (!currentUser) {
+        const nowIso = new Date().toISOString();
+        const localRecord: SocialAccount = {
+          ...basePayload,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        };
+        const nextAccounts = [
+          localRecord,
+          ...currentAccounts.map((acc) =>
+            shouldBeDefault && acc.platform === input.platform
+              ? { ...acc, isDefault: false, updatedAt: nowIso }
+              : acc
+          ),
+        ];
+        socialAccountsRef.current = nextAccounts;
+        setSocialAccounts(nextAccounts);
+        saveLocalJson(LOCAL_ACCOUNTS_KEY, nextAccounts);
+
+        if (shouldBeDefault && workspacePrefsRef.current.autoApplyAccounts) {
+          const nextClips = publishedClipsRef.current.map((clip) =>
+            clip.platform === input.platform &&
+            (!clip.accountId || clip.accountId === 'unassigned')
+              ? {
+                  ...clip,
+                  accountId: id,
+                  accountHandle: localRecord.handle,
+                  updatedAt: nowIso,
+                }
+              : clip
+          );
+          publishedClipsRef.current = nextClips;
+          setPublishedClips(nextClips);
+          saveLocalJson(LOCAL_CLIPS_KEY, nextClips);
+        }
+
+        return localRecord;
+      }
+
+      if (profileReadyUidRef.current !== currentUser.uid) {
+        await ensureUserDocument(currentUser);
+      }
+
+      const payload = {
+        ...basePayload,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       };
@@ -449,7 +646,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             });
 
           if (workspacePrefsRef.current.autoApplyAccounts) {
-            publishedClips
+            publishedClipsRef.current
               .filter(
                 (clip) =>
                   clip.platform === input.platform &&
@@ -472,49 +669,69 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         handleFirestoreError(error, OperationType.CREATE, docPath);
       }
     },
-    [socialAccounts, publishedClips, ensureUserDocument]
+    [ensureUserDocument]
   );
 
   const updateSocialAccount = useCallback(
     async (
       accountId: string,
-      patch: Partial<Omit<AddSocialAccountInput, 'platform' | 'handle' | 'isDefault'>>
+      patch: Partial<Omit<AddSocialAccountInput, 'platform' | 'isDefault'>>
     ) => {
       const currentUser = auth.currentUser;
-      if (!currentUser) throw new Error('Sign in required.');
       const safeId = sanitizeId(accountId);
-      const docPath = `users/${currentUser.uid}/socialAccounts/${safeId}`;
+      const existingAcc = socialAccountsRef.current.find((a) => a.id === safeId);
+      const platform: SocialPlatform = existingAcc?.platform || 'shorts';
 
-      const updateFields: Record<string, any> = {
-        updatedAt: serverTimestamp(),
-      };
+      const cleanPatch: Record<string, any> = {};
+      if (patch.handle !== undefined) {
+        const parsed = parseSocialHandleAndUrl(platform, patch.handle, patch.profileUrl);
+        cleanPatch.handle = sanitizeText(parsed.handle, 100, '@creator');
+        if (patch.profileUrl === undefined && !existingAcc?.profileUrl) {
+          cleanPatch.profileUrl = parsed.profileUrl;
+        }
+      }
       if (patch.displayName !== undefined) {
-        updateFields.displayName = sanitizeText(patch.displayName, 120, 'Creator Account');
+        cleanPatch.displayName = sanitizeText(patch.displayName, 120, 'Creator Account');
       }
       if (patch.profileUrl !== undefined) {
-        updateFields.profileUrl = sanitizeHttpUrl(patch.profileUrl);
+        cleanPatch.profileUrl = sanitizeHttpUrl(patch.profileUrl);
       }
       if (patch.avatarUrl !== undefined) {
-        updateFields.avatarUrl = sanitizeHttpUrl(patch.avatarUrl);
+        cleanPatch.avatarUrl = sanitizeHttpUrl(patch.avatarUrl);
       }
       if (patch.connectionType !== undefined) {
-        updateFields.connectionType = patch.connectionType;
+        cleanPatch.connectionType = patch.connectionType;
       }
       if (patch.followersCount !== undefined) {
-        updateFields.followersCount = sanitizeInt(patch.followersCount);
+        cleanPatch.followersCount = sanitizeInt(patch.followersCount);
       }
       if (patch.postsCount !== undefined) {
-        updateFields.postsCount = sanitizeInt(patch.postsCount, 10000000);
+        cleanPatch.postsCount = sanitizeInt(patch.postsCount, 10000000);
       }
       if (patch.notes !== undefined) {
-        updateFields.notes = sanitizeText(patch.notes, 300, '');
+        cleanPatch.notes = sanitizeText(patch.notes, 300, '');
       }
       if (patch.lastSyncedAt !== undefined) {
-        updateFields.lastSyncedAt = sanitizeText(patch.lastSyncedAt, 64, new Date().toISOString());
+        cleanPatch.lastSyncedAt = sanitizeText(patch.lastSyncedAt, 64, new Date().toISOString());
       }
 
+      if (!currentUser) {
+        const nowIso = new Date().toISOString();
+        const nextAccounts = socialAccountsRef.current.map((acc) =>
+          acc.id === safeId ? { ...acc, ...cleanPatch, updatedAt: nowIso } : acc
+        );
+        socialAccountsRef.current = nextAccounts;
+        setSocialAccounts(nextAccounts);
+        saveLocalJson(LOCAL_ACCOUNTS_KEY, nextAccounts);
+        return;
+      }
+
+      const docPath = `users/${currentUser.uid}/socialAccounts/${safeId}`;
       try {
-        await updateDoc(doc(db, 'users', currentUser.uid, 'socialAccounts', safeId), updateFields);
+        await updateDoc(doc(db, 'users', currentUser.uid, 'socialAccounts', safeId), {
+          ...cleanPatch,
+          updatedAt: serverTimestamp(),
+        });
       } catch (error) {
         handleFirestoreError(error, OperationType.UPDATE, docPath);
       }
@@ -525,13 +742,42 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const setDefaultSocialAccount = useCallback(
     async (accountId: string, platform: SocialPlatform) => {
       const currentUser = auth.currentUser;
-      if (!currentUser) throw new Error('Sign in required.');
       const safeId = sanitizeId(accountId);
+      const targetAcc = socialAccountsRef.current.find((a) => a.id === safeId);
+
+      if (!currentUser) {
+        const nowIso = new Date().toISOString();
+        const nextAccounts = socialAccountsRef.current.map((acc) =>
+          acc.platform === platform
+            ? { ...acc, isDefault: acc.id === safeId, updatedAt: nowIso }
+            : acc
+        );
+        socialAccountsRef.current = nextAccounts;
+        setSocialAccounts(nextAccounts);
+        saveLocalJson(LOCAL_ACCOUNTS_KEY, nextAccounts);
+
+        if (targetAcc && workspacePrefsRef.current.autoApplyAccounts) {
+          const nextClips = publishedClipsRef.current.map((clip) =>
+            clip.platform === platform && (!clip.accountId || clip.accountId === 'unassigned')
+              ? {
+                  ...clip,
+                  accountId: targetAcc.id,
+                  accountHandle: targetAcc.handle,
+                  updatedAt: nowIso,
+                }
+              : clip
+          );
+          publishedClipsRef.current = nextClips;
+          setPublishedClips(nextClips);
+          saveLocalJson(LOCAL_CLIPS_KEY, nextClips);
+        }
+        return;
+      }
+
       const docPath = `users/${currentUser.uid}/socialAccounts/${safeId}`;
-      const targetAcc = socialAccounts.find((a) => a.id === safeId);
       try {
         const batch = writeBatch(db);
-        socialAccounts
+        socialAccountsRef.current
           .filter((a) => a.platform === platform)
           .forEach((acc) => {
             const nextDefault = acc.id === safeId;
@@ -544,7 +790,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           });
 
         if (targetAcc && workspacePrefsRef.current.autoApplyAccounts) {
-          publishedClips
+          publishedClipsRef.current
             .filter(
               (clip) =>
                 clip.platform === platform && (!clip.accountId || clip.accountId === 'unassigned')
@@ -564,13 +810,21 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         handleFirestoreError(error, OperationType.UPDATE, docPath);
       }
     },
-    [socialAccounts, publishedClips]
+    []
   );
 
   const removeSocialAccount = useCallback(async (accountId: string) => {
     const currentUser = auth.currentUser;
-    if (!currentUser) throw new Error('Sign in required.');
     const safeId = sanitizeId(accountId);
+
+    if (!currentUser) {
+      const nextAccounts = socialAccountsRef.current.filter((a) => a.id !== safeId);
+      socialAccountsRef.current = nextAccounts;
+      setSocialAccounts(nextAccounts);
+      saveLocalJson(LOCAL_ACCOUNTS_KEY, nextAccounts);
+      return;
+    }
+
     const docPath = `users/${currentUser.uid}/socialAccounts/${safeId}`;
     try {
       await deleteDoc(doc(db, 'users', currentUser.uid, 'socialAccounts', safeId));
@@ -582,22 +836,22 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const logClipExport = useCallback(
     async (input: LogClipExportInput): Promise<PublishedClipRecord | null> => {
       const currentUser = auth.currentUser;
-      if (!currentUser) return null;
-      if (profileReadyUidRef.current !== currentUser.uid) {
-        await ensureUserDocument(currentUser);
-      }
-
       const defaultAccount = workspacePrefsRef.current.autoApplyAccounts
         ? getDefaultAccountForPlatform(input.platform)
         : undefined;
-      const id = sanitizeId(`cliprec_${input.platform}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
-      const docPath = `users/${currentUser.uid}/publishedClips/${id}`;
+      const id = sanitizeId(
+        `cliprec_${input.platform}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+      );
 
-      const payload = {
+      const basePayload = {
         id,
-        userId: currentUser.uid,
+        userId: currentUser?.uid || 'local',
         accountId: sanitizeText(input.accountId || defaultAccount?.id, 128, 'unassigned'),
-        accountHandle: sanitizeText(input.accountHandle || defaultAccount?.handle, 100, 'No account linked'),
+        accountHandle: sanitizeText(
+          input.accountHandle || defaultAccount?.handle,
+          100,
+          'No account linked'
+        ),
         platform: input.platform,
         clipId: sanitizeId(input.clipId || 'clip'),
         clipTitle: sanitizeText(input.clipTitle, 200, 'Untitled Short'),
@@ -613,6 +867,29 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         shares: sanitizeInt(input.shares),
         durationSec: sanitizeInt(input.durationSec, 600),
         viralityScore: sanitizeInt(input.viralityScore, 100),
+      };
+
+      if (!currentUser) {
+        const nowIso = new Date().toISOString();
+        const localRec: PublishedClipRecord = {
+          ...basePayload,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        };
+        const nextClips = [localRec, ...publishedClipsRef.current];
+        publishedClipsRef.current = nextClips;
+        setPublishedClips(nextClips);
+        saveLocalJson(LOCAL_CLIPS_KEY, nextClips);
+        return localRec;
+      }
+
+      if (profileReadyUidRef.current !== currentUser.uid) {
+        await ensureUserDocument(currentUser);
+      }
+
+      const docPath = `users/${currentUser.uid}/publishedClips/${id}`;
+      const payload = {
+        ...basePayload,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       };
@@ -630,10 +907,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const updatePublishedClip = useCallback(
     async (recordId: string, patch: UpdatePublishedClipPatch) => {
       const currentUser = auth.currentUser;
-      if (!currentUser) throw new Error('Sign in required.');
       const safeId = sanitizeId(recordId);
-      const docPath = `users/${currentUser.uid}/publishedClips/${safeId}`;
-      const ref = doc(db, 'users', currentUser.uid, 'publishedClips', safeId);
 
       const statusOrMetaKeys: Record<string, any> = {};
       if (patch.status !== undefined) statusOrMetaKeys.status = patch.status;
@@ -657,6 +931,33 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const sharedCaption =
         patch.captionCopy !== undefined ? sanitizeText(patch.captionCopy, 2000, '') : undefined;
 
+      if (!currentUser) {
+        const nowIso = new Date().toISOString();
+        const nextClips = publishedClipsRef.current.map((rec) => {
+          if (rec.id !== safeId) return rec;
+          const nextStatus =
+            rec.status === 'published'
+              ? 'published'
+              : (statusOrMetaKeys.status ?? rec.status);
+          return {
+            ...rec,
+            ...statusOrMetaKeys,
+            ...metricKeys,
+            status: nextStatus,
+            ...(sharedUrl !== undefined ? { postUrl: sharedUrl } : {}),
+            ...(sharedCaption !== undefined ? { captionCopy: sharedCaption } : {}),
+            updatedAt: nowIso,
+          };
+        });
+        publishedClipsRef.current = nextClips;
+        setPublishedClips(nextClips);
+        saveLocalJson(LOCAL_CLIPS_KEY, nextClips);
+        return;
+      }
+
+      const docPath = `users/${currentUser.uid}/publishedClips/${safeId}`;
+      const ref = doc(db, 'users', currentUser.uid, 'publishedClips', safeId);
+
       try {
         const hasStatusChanges = Object.keys(statusOrMetaKeys).length > 0;
         const hasMetricChanges = Object.keys(metricKeys).length > 0;
@@ -670,7 +971,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           });
         }
 
-        if (hasMetricChanges || (!hasStatusChanges && (sharedUrl !== undefined || sharedCaption !== undefined))) {
+        if (
+          hasMetricChanges ||
+          (!hasStatusChanges && (sharedUrl !== undefined || sharedCaption !== undefined))
+        ) {
           await updateDoc(ref, {
             ...metricKeys,
             ...(sharedUrl !== undefined ? { postUrl: sharedUrl } : {}),
@@ -687,8 +991,16 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const deletePublishedClip = useCallback(async (recordId: string) => {
     const currentUser = auth.currentUser;
-    if (!currentUser) throw new Error('Sign in required.');
     const safeId = sanitizeId(recordId);
+
+    if (!currentUser) {
+      const nextClips = publishedClipsRef.current.filter((r) => r.id !== safeId);
+      publishedClipsRef.current = nextClips;
+      setPublishedClips(nextClips);
+      saveLocalJson(LOCAL_CLIPS_KEY, nextClips);
+      return;
+    }
+
     const docPath = `users/${currentUser.uid}/publishedClips/${safeId}`;
     try {
       await deleteDoc(doc(db, 'users', currentUser.uid, 'publishedClips', safeId));
@@ -700,11 +1012,6 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const updateWorkspacePrefs = useCallback(
     async (patch: Partial<WorkspacePreferencesValues>) => {
       const currentUser = auth.currentUser;
-      if (!currentUser) return;
-      if (profileReadyUidRef.current !== currentUser.uid) {
-        await ensureUserDocument(currentUser);
-      }
-
       const sanitizedPatch: Record<string, any> = {};
       if (patch.autoApplyAccounts !== undefined) {
         sanitizedPatch.autoApplyAccounts = Boolean(patch.autoApplyAccounts);
@@ -749,12 +1056,24 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
       if (Object.keys(sanitizedPatch).length === 0) return;
 
+      // Optimistically reflect locally immediately
+      const nextPrefsObj = { ...workspacePrefsRef.current, ...sanitizedPatch };
+      workspacePrefsRef.current = nextPrefsObj;
+      setWorkspacePrefs(nextPrefsObj);
+
+      if (!currentUser) {
+        const { id: _id, userId: _uid, createdAt: _c, updatedAt: _u, ...valuesOnly } = nextPrefsObj;
+        saveLocalJson(LOCAL_PREFS_KEY, valuesOnly);
+        return;
+      }
+
+      if (profileReadyUidRef.current !== currentUser.uid) {
+        await ensureUserDocument(currentUser);
+      }
+
       const prefId = workspacePrefsRef.current.id || 'workspace';
       const docPath = `users/${currentUser.uid}/preferences/${prefId}`;
       const prefRef = doc(db, 'users', currentUser.uid, 'preferences', prefId);
-
-      // Optimistically reflect locally immediately
-      setWorkspacePrefs((prev) => ({ ...prev, ...sanitizedPatch }));
 
       try {
         if (!hasWorkspacePrefsDocRef.current) {
@@ -763,9 +1082,13 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             id: prefId,
             userId: currentUser.uid,
             autoApplyAccounts:
-              sanitizedPatch.autoApplyAccounts ?? cur.autoApplyAccounts ?? DEFAULT_WORKSPACE_PREFS.autoApplyAccounts,
+              sanitizedPatch.autoApplyAccounts ??
+              cur.autoApplyAccounts ??
+              DEFAULT_WORKSPACE_PREFS.autoApplyAccounts,
             autoApplyAiFraming:
-              sanitizedPatch.autoApplyAiFraming ?? cur.autoApplyAiFraming ?? DEFAULT_WORKSPACE_PREFS.autoApplyAiFraming,
+              sanitizedPatch.autoApplyAiFraming ??
+              cur.autoApplyAiFraming ??
+              DEFAULT_WORKSPACE_PREFS.autoApplyAiFraming,
             autoApplyStyleAcrossClips:
               sanitizedPatch.autoApplyStyleAcrossClips ??
               cur.autoApplyStyleAcrossClips ??
@@ -775,9 +1098,13 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               cur.autoSyncStatsOnOpen ??
               DEFAULT_WORKSPACE_PREFS.autoSyncStatsOnOpen,
             captionPreset:
-              sanitizedPatch.captionPreset ?? cur.captionPreset ?? DEFAULT_WORKSPACE_PREFS.captionPreset,
+              sanitizedPatch.captionPreset ??
+              cur.captionPreset ??
+              DEFAULT_WORKSPACE_PREFS.captionPreset,
             captionColor:
-              sanitizedPatch.captionColor ?? cur.captionColor ?? DEFAULT_WORKSPACE_PREFS.captionColor,
+              sanitizedPatch.captionColor ??
+              cur.captionColor ??
+              DEFAULT_WORKSPACE_PREFS.captionColor,
             captionHighlightStyle:
               sanitizedPatch.captionHighlightStyle ??
               cur.captionHighlightStyle ??
@@ -804,14 +1131,33 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const autoApplyPrimaryAccountsToClips = useCallback(async (): Promise<number> => {
     const currentUser = auth.currentUser;
-    if (!currentUser) return 0;
-
-    const candidates = publishedClips.filter((rec) => {
+    const candidates = publishedClipsRef.current.filter((rec) => {
       if (rec.accountId && rec.accountId !== 'unassigned') return false;
       return Boolean(getDefaultAccountForPlatform(rec.platform));
     });
 
     if (candidates.length === 0) return 0;
+
+    if (!currentUser) {
+      const nowIso = new Date().toISOString();
+      let updatedCount = 0;
+      const nextClips = publishedClipsRef.current.map((rec) => {
+        if (rec.accountId && rec.accountId !== 'unassigned') return rec;
+        const defAcc = getDefaultAccountForPlatform(rec.platform);
+        if (!defAcc) return rec;
+        updatedCount += 1;
+        return {
+          ...rec,
+          accountId: defAcc.id,
+          accountHandle: defAcc.handle,
+          updatedAt: nowIso,
+        };
+      });
+      publishedClipsRef.current = nextClips;
+      setPublishedClips(nextClips);
+      saveLocalJson(LOCAL_CLIPS_KEY, nextClips);
+      return updatedCount;
+    }
 
     try {
       let updatedCount = 0;
@@ -838,7 +1184,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         `users/${currentUser.uid}/publishedClips`
       );
     }
-  }, [publishedClips, getDefaultAccountForPlatform]);
+  }, [getDefaultAccountForPlatform]);
 
   return (
     <FirebaseContext.Provider
@@ -848,6 +1194,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         isSigningIn,
         authError,
         isLoadingData,
+        isLocalWorkspace: !user,
         socialAccounts,
         publishedClips,
         workspacePrefs,
