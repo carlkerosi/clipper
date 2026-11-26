@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { SAMPLE_VIDEOS } from './data/sampleVideos';
 import { VideoSource, ClipHighlight, ExportSettings, ClipGenerationOptions } from './types';
 import { ExportPlatform, PLATFORM_PRESETS } from './utils/platformExport';
@@ -6,7 +6,7 @@ import { Header } from './components/Header';
 import { OpusClipHero } from './components/OpusClipHero';
 import { OpusClipFeed } from './components/OpusClipFeed';
 import { HighlightList } from './components/HighlightList';
-import { VerticalStudioPreview } from './components/VerticalStudioPreview';
+import { VerticalStudioPreview, TrimMarkerFeedback } from './components/VerticalStudioPreview';
 import { CaptionStyleCustomizer } from './components/CaptionStyleCustomizer';
 import { TimelineTrimmer } from './components/TimelineTrimmer';
 import { TranscriptEditor } from './components/TranscriptEditor';
@@ -18,7 +18,46 @@ import { MonitoringDashboard } from './components/MonitoringDashboard';
 import { AddSocialAccountModal } from './components/AddSocialAccountModal';
 import { useFirebase } from './contexts/FirebaseContext';
 import { parseJsonResponse } from './utils/safeFetchJson';
-import { Sparkles, Sliders, FileText, ArrowLeft, RefreshCw, Loader2, Palette, Zap } from 'lucide-react';
+import {
+  Sparkles,
+  Sliders,
+  FileText,
+  ArrowLeft,
+  RefreshCw,
+  Loader2,
+  Palette,
+  Zap,
+  Save,
+  RotateCcw,
+  Trash2,
+  Cloud,
+} from 'lucide-react';
+
+function buildDraftSignature(
+  clip: ClipHighlight,
+  settings: ExportSettings,
+  videoId: string,
+  mode: string,
+  timeSec: number
+): string {
+  return JSON.stringify({
+    videoId,
+    mode,
+    t: Math.round(timeSec),
+    clip: {
+      id: clip.id,
+      title: clip.title,
+      hook: clip.hook,
+      startTime: clip.startTime,
+      endTime: clip.endTime,
+      panX: clip.panX,
+      framingSuggestion: clip.framingSuggestion,
+      clipVideoUrl: clip.clipVideoUrl,
+      captions: clip.captions,
+    },
+    settings,
+  });
+}
 
 export default function App() {
   const [appMode, setAppMode] = useState<'generator' | 'feed' | 'studio' | 'dashboard'>('generator');
@@ -67,6 +106,10 @@ export default function App() {
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [exportInitialPlatform, setExportInitialPlatform] = useState<ExportPlatform>('tiktok');
+  const [exportInitialSelectedClipIds, setExportInitialSelectedClipIds] = useState<string[] | undefined>(undefined);
+  const [exportInitialMode, setExportInitialMode] = useState<'batch' | 'reel'>('batch');
+  const [exportInitialResolution, setExportInitialResolution] = useState<'1080p' | '720p' | undefined>(undefined);
+  const [exportInitialBurnCaptions, setExportInitialBurnCaptions] = useState<boolean | undefined>(undefined);
   const [exportAutoStartNonce, setExportAutoStartNonce] = useState(0);
   const [isAccountModalOpen, setIsAccountModalOpen] = useState(false);
   const [accountModalPlatform, setAccountModalPlatform] = useState<ExportPlatform>('shorts');
@@ -76,10 +119,57 @@ export default function App() {
   const [aiBoostingClipId, setAiBoostingClipId] = useState<string | null>(null);
   const [rightPanelTab, setRightPanelTab] = useState<'style' | 'effects' | 'transcript'>('style');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [hasActiveEditSession, setHasActiveEditSession] = useState(false);
+  const [draftBannerDismissed, setDraftBannerDismissed] = useState(false);
+  const [syncCaptionsOnTrim, setSyncCaptionsOnTrim] = useState(true);
+  const [trimFeedback, setTrimFeedback] = useState<TrimMarkerFeedback | null>(null);
+  const [trimHistoryCount, setTrimHistoryCount] = useState(0);
+  const [playToggleNonce, setPlayToggleNonce] = useState(0);
 
-  const { user, workspacePrefs, workspacePrefsLoaded, updateWorkspacePrefs } = useFirebase();
+  const {
+    user,
+    signInWithGoogle,
+    workspacePrefs,
+    workspacePrefsLoaded,
+    updateWorkspacePrefs,
+    savedDraft,
+    draftLoaded,
+    isSavingDraft,
+    lastDraftSavedAt,
+    saveClipDraft,
+    clearClipDraft,
+  } = useFirebase();
   const appliedInitialPrefsUidRef = useRef<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const trimHistoryRef = useRef<
+    Array<{
+      clipId: string;
+      startTime: number;
+      endTime: number;
+      captions: ClipHighlight['captions'];
+    }>
+  >([]);
+  const syncCaptionsOnTrimRef = useRef(syncCaptionsOnTrim);
+  syncCaptionsOnTrimRef.current = syncCaptionsOnTrim;
+  const lastSavedDraftSigRef = useRef<string>('');
+  const latestDraftSnapshotRef = useRef({
+    appMode,
+    currentTime,
+    currentVideo,
+    activeClip,
+    settings,
+    hasActiveEditSession,
+    isProcessing,
+  });
+  latestDraftSnapshotRef.current = {
+    appMode,
+    currentTime,
+    currentVideo,
+    activeClip,
+    settings,
+    hasActiveEditSession,
+    isProcessing,
+  };
 
   // Hydrate saved caption + video filter preset once per signed-in session
   useEffect(() => {
@@ -153,6 +243,122 @@ export default function App() {
     setTimeout(() => setToastMessage(null), 3500);
   };
 
+  const performAutoDraftSave = useCallback(
+    async (force = false): Promise<boolean> => {
+      const snap = latestDraftSnapshotRef.current;
+      if (!snap.hasActiveEditSession || snap.isProcessing) return false;
+      if (snap.appMode !== 'studio' && snap.appMode !== 'feed') return false;
+
+      const sig = buildDraftSignature(
+        snap.activeClip,
+        snap.settings,
+        snap.currentVideo.id,
+        snap.appMode,
+        snap.currentTime
+      );
+      if (!force && sig === lastSavedDraftSigRef.current) return false;
+
+      await saveClipDraft({
+        appMode: snap.appMode,
+        currentTime: snap.currentTime,
+        video: snap.currentVideo,
+        clip: snap.activeClip,
+        settings: snap.settings,
+      });
+      lastSavedDraftSigRef.current = sig;
+      return true;
+    },
+    [saveClipDraft]
+  );
+
+  // Auto-Draft: save current active clip editing state to Firestore every 30 seconds
+  useEffect(() => {
+    if (!hasActiveEditSession || (appMode !== 'studio' && appMode !== 'feed')) return;
+    const intervalId = window.setInterval(() => {
+      performAutoDraftSave(false).catch(() => {});
+    }, 30000);
+    return () => window.clearInterval(intervalId);
+  }, [hasActiveEditSession, appMode, performAutoDraftSave]);
+
+  // Flush unsaved draft when browser tab is hidden or closed
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        performAutoDraftSave(false).catch(() => {});
+      }
+    };
+    const handlePageHide = () => {
+      performAutoDraftSave(false).catch(() => {});
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('pagehide', handlePageHide);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pagehide', handlePageHide);
+    };
+  }, [performAutoDraftSave]);
+
+  const handleResumeDraft = () => {
+    if (!savedDraft) return;
+    const matchingSample = SAMPLE_VIDEOS.find((s) => s.id === savedDraft.video.id);
+    const fallbackThumb = matchingSample?.thumbnail || SAMPLE_VIDEOS[0].thumbnail;
+    const restoredHighlights = matchingSample
+      ? matchingSample.highlights.map((h) => (h.id === savedDraft.clip.id ? savedDraft.clip : h))
+      : [savedDraft.clip];
+    if (matchingSample && !restoredHighlights.some((h) => h.id === savedDraft.clip.id)) {
+      restoredHighlights.unshift(savedDraft.clip);
+    }
+
+    const restoredVideo: VideoSource = {
+      ...savedDraft.video,
+      thumbnail: savedDraft.video.thumbnail || fallbackThumb,
+      playableSourceUrl: savedDraft.video.playableSourceUrl || savedDraft.video.videoUrl,
+      highlights: restoredHighlights,
+    };
+
+    const nextMode: 'studio' | 'feed' = savedDraft.appMode === 'feed' ? 'feed' : 'studio';
+    const resumeTime = savedDraft.currentTime || savedDraft.clip.startTime || 0;
+
+    setCurrentVideo(restoredVideo);
+    setActiveClip(savedDraft.clip);
+    setSettings(savedDraft.settings);
+    setCurrentTime(resumeTime);
+    setHasActiveEditSession(true);
+    setDraftBannerDismissed(true);
+    lastSavedDraftSigRef.current = buildDraftSignature(
+      savedDraft.clip,
+      savedDraft.settings,
+      restoredVideo.id,
+      nextMode,
+      resumeTime
+    );
+    setAppMode(nextMode);
+    showToast(`Resumed "${savedDraft.clip.title}" from Auto-Draft.`);
+  };
+
+  const handleManualSaveDraft = async () => {
+    try {
+      setHasActiveEditSession(true);
+      latestDraftSnapshotRef.current.hasActiveEditSession = true;
+      await performAutoDraftSave(true);
+      showToast(
+        user ? 'Draft synced to Firestore.' : 'Draft saved locally (sign in to sync to Firestore).'
+      );
+    } catch (err: any) {
+      showToast(err?.message || 'Could not save draft.');
+    }
+  };
+
+  const handleDiscardDraft = async () => {
+    setDraftBannerDismissed(true);
+    try {
+      await clearClipDraft();
+      showToast('Discarded saved Auto-Draft.');
+    } catch {
+      // Ignore cleanup errors
+    }
+  };
+
   const handleQuickExportPlatform = (platform: ExportPlatform, clipOverride?: ClipHighlight) => {
     const targetClip = clipOverride || activeClip;
     if (!targetClip) return;
@@ -160,21 +366,230 @@ export default function App() {
       handleSelectClip(clipOverride);
     }
     setExportInitialPlatform(platform);
+    setExportInitialSelectedClipIds([targetClip.id]);
+    setExportInitialMode('batch');
+    setExportInitialResolution(undefined);
+    setExportInitialBurnCaptions(undefined);
     setExportAutoStartNonce((n) => n + 1);
     setIsExportModalOpen(true);
     const preset = PLATFORM_PRESETS[platform];
     showToast(`Quick exporting ${preset.label} (${preset.shortcut})...`);
   };
 
+  const formatTrimTime = (sec: number) => {
+    const safe = Math.max(0, sec);
+    const m = Math.floor(safe / 60);
+    const s = Math.floor(safe % 60);
+    const d = Math.floor((safe % 1) * 10);
+    return `${m}:${String(s).padStart(2, '0')}.${d}`;
+  };
+
+  const applyClipTimeUpdate = useCallback(
+    (
+      newStart: number,
+      newEnd: number,
+      options?: { skipHistory?: boolean; shiftCaptions?: boolean }
+    ) => {
+      const snap = latestDraftSnapshotRef.current;
+      const vid = snap.currentVideo;
+      const maxDur = Math.max(4, vid.duration || 86400);
+      const minSpan = 2;
+
+      const clampedStart = Math.max(
+        0,
+        Math.min(maxDur - minSpan, Math.round(newStart * 10) / 10)
+      );
+      const clampedEnd = Math.min(
+        maxDur,
+        Math.max(clampedStart + minSpan, Math.round(newEnd * 10) / 10)
+      );
+
+      const hasFullDirectSource = Boolean(
+        vid.playableSourceUrl ||
+          (vid.videoUrl &&
+            !vid.videoUrl.includes('youtube.com') &&
+            !vid.videoUrl.includes('youtu.be'))
+      );
+
+      setHasActiveEditSession(true);
+      setActiveClip((prev) => {
+        if (!options?.skipHistory && (prev.startTime !== clampedStart || prev.endTime !== clampedEnd)) {
+          trimHistoryRef.current = [
+            ...trimHistoryRef.current.slice(-24),
+            {
+              clipId: prev.id,
+              startTime: prev.startTime,
+              endTime: prev.endTime,
+              captions: prev.captions,
+            },
+          ];
+          setTrimHistoryCount(
+            trimHistoryRef.current.filter((entry) => entry.clipId === prev.id).length
+          );
+        }
+
+        const deltaStart = clampedStart - prev.startTime;
+        const shouldShiftCaptions =
+          options?.shiftCaptions !== false && syncCaptionsOnTrimRef.current && deltaStart !== 0;
+
+        const nextCaptions = shouldShiftCaptions
+          ? prev.captions.map((c) => ({
+              ...c,
+              start: Math.round((c.start - deltaStart) * 100) / 100,
+              end: Math.round((c.end - deltaStart) * 100) / 100,
+              words: c.words?.map((w) => ({
+                ...w,
+                start: Math.round((w.start - deltaStart) * 100) / 100,
+                end: Math.round((w.end - deltaStart) * 100) / 100,
+              })),
+            }))
+          : prev.captions;
+
+        const updated: ClipHighlight = {
+          ...prev,
+          startTime: clampedStart,
+          endTime: clampedEnd,
+          captions: nextCaptions,
+          ...(hasFullDirectSource ? { clipVideoUrl: undefined, downloadUrl: undefined } : {}),
+        };
+
+        setCurrentVideo((v) => ({
+          ...v,
+          highlights: v.highlights.map((h) => (h.id === updated.id ? updated : h)),
+        }));
+        return updated;
+      });
+    },
+    []
+  );
+
+  const handleSetTrimMarkerFromPlayhead = useCallback(
+    (edge: 'in' | 'out') => {
+      const snap = latestDraftSnapshotRef.current;
+      const clip = snap.activeClip;
+      if (!clip) return;
+
+      const total = Math.max(4, snap.currentVideo.duration || 3600);
+      const rawPlayhead =
+        videoRef.current && Number.isFinite(videoRef.current.currentTime)
+          ? Boolean(
+              snap.currentVideo.playableSourceUrl ||
+                (snap.currentVideo.videoUrl &&
+                  !snap.currentVideo.videoUrl.includes('youtube.com') &&
+                  !snap.currentVideo.videoUrl.includes('youtu.be'))
+            )
+            ? videoRef.current.currentTime
+            : snap.currentTime
+          : snap.currentTime;
+
+      const playhead = Math.round(rawPlayhead * 10) / 10;
+
+      if (edge === 'in') {
+        const targetStart = Math.max(0, Math.min(total - 2, playhead));
+        let nextEnd = clip.endTime;
+        let note: string | undefined;
+        if (targetStart > clip.endTime - 2) {
+          nextEnd = Math.min(total, Math.round((targetStart + 15) * 10) / 10);
+          note = `Out -> ${formatTrimTime(nextEnd)}`;
+        }
+        applyClipTimeUpdate(targetStart, nextEnd);
+        const durSec = Math.round((nextEnd - targetStart) * 10) / 10;
+        setTrimFeedback({ edge: 'in', time: targetStart, nonce: Date.now(), note });
+        showToast(
+          note
+            ? `In marker set to ${formatTrimTime(targetStart)} (Out shifted to ${formatTrimTime(nextEnd)})`
+            : `In marker set to ${formatTrimTime(targetStart)} (${durSec}s clip)`
+        );
+      } else {
+        const targetEnd = Math.max(2, Math.min(total, playhead));
+        let nextStart = clip.startTime;
+        let note: string | undefined;
+        if (targetEnd < clip.startTime + 2) {
+          nextStart = Math.max(0, Math.round((targetEnd - 15) * 10) / 10);
+          note = `In -> ${formatTrimTime(nextStart)}`;
+        }
+        applyClipTimeUpdate(nextStart, targetEnd);
+        const durSec = Math.round((targetEnd - nextStart) * 10) / 10;
+        setTrimFeedback({ edge: 'out', time: targetEnd, nonce: Date.now(), note });
+        showToast(
+          note
+            ? `Out marker set to ${formatTrimTime(targetEnd)} (In pulled to ${formatTrimTime(nextStart)})`
+            : `Out marker set to ${formatTrimTime(targetEnd)} (${durSec}s clip)`
+        );
+      }
+    },
+    [applyClipTimeUpdate]
+  );
+
+  const handleUndoTrim = useCallback(() => {
+    const snap = latestDraftSnapshotRef.current;
+    const clipId = snap.activeClip?.id;
+    if (!clipId) return;
+
+    const history = trimHistoryRef.current;
+    let idx = -1;
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (history[i].clipId === clipId) {
+        idx = i;
+        break;
+      }
+    }
+    if (idx === -1) return;
+
+    const entry = history[idx];
+    trimHistoryRef.current = [...history.slice(0, idx), ...history.slice(idx + 1)];
+    setTrimHistoryCount(
+      trimHistoryRef.current.filter((item) => item.clipId === clipId).length
+    );
+
+    setActiveClip((prev) => {
+      if (prev.id !== clipId) return prev;
+      const restored: ClipHighlight = {
+        ...prev,
+        startTime: entry.startTime,
+        endTime: entry.endTime,
+        captions: entry.captions,
+      };
+      setCurrentVideo((v) => ({
+        ...v,
+        highlights: v.highlights.map((h) => (h.id === restored.id ? restored : h)),
+      }));
+      return restored;
+    });
+
+    showToast(`Restored trim ${formatTrimTime(entry.startTime)} – ${formatTrimTime(entry.endTime)}`);
+  }, []);
+
+  const seekSourcePlayhead = useCallback((time: number) => {
+    const snap = latestDraftSnapshotRef.current;
+    const total = Math.max(1, snap.currentVideo.duration || 86400);
+    const clamped = Math.max(0, Math.min(total, Math.round(time * 10) / 10));
+    setCurrentTime(clamped);
+    const hasFullSource = Boolean(
+      snap.currentVideo.playableSourceUrl ||
+        (snap.currentVideo.videoUrl &&
+          !snap.currentVideo.videoUrl.includes('youtube.com') &&
+          !snap.currentVideo.videoUrl.includes('youtu.be'))
+    );
+    if (videoRef.current) {
+      try {
+        videoRef.current.currentTime =
+          !hasFullSource && snap.activeClip.clipVideoUrl
+            ? Math.max(0, clamped - snap.activeClip.startTime)
+            : clamped;
+      } catch {}
+    }
+  }, []);
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (appMode === 'generator' || isProcessing || !activeClip) return;
-      if (e.ctrlKey || e.metaKey || e.altKey || !e.shiftKey) return;
+      const snap = latestDraftSnapshotRef.current;
+      if (snap.appMode === 'generator' || snap.isProcessing || !snap.activeClip) return;
 
       const target = e.target as HTMLElement | null;
       if (
         target &&
-        (target.tagName === 'INPUT' ||
+        ((target.tagName === 'INPUT' && (target as HTMLInputElement).type !== 'range') ||
           target.tagName === 'TEXTAREA' ||
           target.tagName === 'SELECT' ||
           target.isContentEditable)
@@ -182,6 +597,71 @@ export default function App() {
         return;
       }
 
+      // Ctrl+[ / Ctrl+] (or Cmd+[ / Cmd+]) to set Start / End trim markers from active player
+      if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+        const isInKey = e.key === '[' || e.code === 'BracketLeft';
+        const isOutKey = e.key === ']' || e.code === 'BracketRight';
+        if (snap.appMode === 'studio' && isInKey) {
+          e.preventDefault();
+          handleSetTrimMarkerFromPlayhead('in');
+          return;
+        }
+        if (snap.appMode === 'studio' && isOutKey) {
+          e.preventDefault();
+          handleSetTrimMarkerFromPlayhead('out');
+          return;
+        }
+        if (snap.appMode === 'studio' && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+          e.preventDefault();
+          handleUndoTrim();
+          return;
+        }
+        return;
+      }
+
+      if (e.altKey) return;
+
+      // Studio NLE player transport & frame-nudge shortcuts
+      if (snap.appMode === 'studio') {
+        const keyLower = e.key.toLowerCase();
+        if ((e.code === 'Space' || keyLower === 'k') && !e.shiftKey) {
+          e.preventDefault();
+          setPlayToggleNonce((n) => n + 1);
+          return;
+        }
+        if (keyLower === 'j' && !e.shiftKey) {
+          e.preventDefault();
+          seekSourcePlayhead(snap.currentTime - 5);
+          return;
+        }
+        if (keyLower === 'l' && !e.shiftKey) {
+          e.preventDefault();
+          seekSourcePlayhead(snap.currentTime + 5);
+          return;
+        }
+        if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          seekSourcePlayhead(snap.currentTime - (e.shiftKey ? 0.1 : 1));
+          return;
+        }
+        if (e.key === 'ArrowRight') {
+          e.preventDefault();
+          seekSourcePlayhead(snap.currentTime + (e.shiftKey ? 0.1 : 1));
+          return;
+        }
+        if ((e.key === '[' || e.code === 'BracketLeft') && !e.shiftKey) {
+          e.preventDefault();
+          seekSourcePlayhead(snap.activeClip.startTime);
+          return;
+        }
+        if ((e.key === ']' || e.code === 'BracketRight') && !e.shiftKey) {
+          e.preventDefault();
+          seekSourcePlayhead(snap.activeClip.endTime);
+          return;
+        }
+      }
+
+      if (!e.shiftKey) return;
       const key = e.key.toLowerCase();
       if (key === 'y') {
         e.preventDefault();
@@ -194,10 +674,14 @@ export default function App() {
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [appMode, isProcessing, activeClip]);
+  }, [handleSetTrimMarkerFromPlayhead, handleUndoTrim, seekSourcePlayhead]);
 
   const handleSelectClip = (clip: ClipHighlight) => {
+    setHasActiveEditSession(true);
     setActiveClip(clip);
+    setTrimHistoryCount(
+      trimHistoryRef.current.filter((entry) => entry.clipId === clip.id).length
+    );
     setSettings((prev) => ({
       ...prev,
       hookBannerText: clip.hook,
@@ -226,27 +710,25 @@ export default function App() {
 
   const handleSelectClipToEdit = (clip: ClipHighlight) => {
     handleSelectClip(clip);
+    setHasActiveEditSession(true);
     setAppMode('studio');
   };
 
   const handleUpdateSettings = (newSettings: Partial<ExportSettings>) => {
+    setHasActiveEditSession(true);
     setSettings((prev) => ({ ...prev, ...newSettings }));
   };
 
-  const handleUpdateClipTime = (newStart: number, newEnd: number) => {
-    const roundedStart = Math.round(newStart * 10) / 10;
-    const roundedEnd = Math.round(newEnd * 10) / 10;
-    setActiveClip((prev) => {
-      const updated = { ...prev, startTime: roundedStart, endTime: roundedEnd };
-      setCurrentVideo((v) => ({
-        ...v,
-        highlights: v.highlights.map((h) => (h.id === updated.id ? updated : h)),
-      }));
-      return updated;
-    });
+  const handleUpdateClipTime = (
+    newStart: number,
+    newEnd: number,
+    options?: { skipHistory?: boolean; shiftCaptions?: boolean }
+  ) => {
+    applyClipTimeUpdate(newStart, newEnd, options);
   };
 
   const handleClipUpdated = (updatedClip: ClipHighlight) => {
+    setHasActiveEditSession(true);
     setCurrentVideo((prev) => ({
       ...prev,
       highlights: prev.highlights.map((h) => (h.id === updatedClip.id ? updatedClip : h)),
@@ -267,6 +749,7 @@ export default function App() {
       const res = await fetch('/api/clip-video', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(55000),
         body: JSON.stringify({
           videoUrl: currentVideo.videoUrl,
           playableSourceUrl: currentVideo.playableSourceUrl,
@@ -383,6 +866,7 @@ export default function App() {
       const res = await fetch('/api/ai-optimize-clip', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(35000),
         body: JSON.stringify({
           clip,
           videoTitle: currentVideo.title,
@@ -475,6 +959,7 @@ export default function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ url: video.youtubeUrl }),
+          signal: AbortSignal.timeout(42000),
         });
 
         const ytData = await parseJsonResponse(ytRes, 'Could not retrieve YouTube video info');
@@ -502,6 +987,7 @@ export default function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ url: video.videoUrl }),
+          signal: AbortSignal.timeout(45000),
         });
 
         const urlData = await parseJsonResponse(urlRes, 'Could not ingest external video URL');
@@ -526,9 +1012,11 @@ export default function App() {
       }
 
       // Step 2: Multimodal Speech Transcription + Keyframe Visual Inspection
+      // Built-in samples already ship with rich transcripts, so skip redundant slow Step 2 blocking on them.
       const hasTranscript = Boolean(video.transcript && video.transcript.trim().length >= 40);
+      const needsStep2 = !hasTranscript || (!video.visualSummary && video.sourceType !== 'sample');
       setProcessingProgress(36);
-      if (!hasTranscript || !video.visualSummary) {
+      if (needsStep2) {
         const canTranscribeSource = Boolean(
           video.playableSourceUrl || (video.youtubeUrl && !video.youtubeDownloadBlocked)
         );
@@ -538,31 +1026,42 @@ export default function App() {
               ? '2/4: Inspecting visual keyframes for 9:16 smart framing...'
               : '2/4: Gemini AI listening to audio & analyzing visual keyframes...'
           );
-          const trRes = await fetch('/api/transcribe-video', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              videoUrl: video.videoUrl,
-              playableSourceUrl: video.playableSourceUrl,
-              youtubeUrl: video.youtubeUrl,
-              youtubeDownloadBlocked: Boolean(video.youtubeDownloadBlocked),
-              skipAudio: hasTranscript,
-            }),
-          });
-          const trData = await parseJsonResponse(trRes, 'Video transcription failed');
-          if (!trRes.ok) {
-            if (trData.code === 'MISSING_API_KEY' || trData.code === 'API_KEY_INVALID' || trData.code === 'PERMISSION_DENIED') {
-              throw new Error(trData.error);
+          try {
+            const trRes = await fetch('/api/transcribe-video', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                videoUrl: video.videoUrl,
+                playableSourceUrl: video.playableSourceUrl,
+                youtubeUrl: video.youtubeUrl,
+                youtubeDownloadBlocked: Boolean(video.youtubeDownloadBlocked),
+                skipAudio: hasTranscript,
+              }),
+              signal: AbortSignal.timeout(45000),
+            });
+            const trData = await parseJsonResponse(trRes, 'Video transcription failed');
+            if (!trRes.ok) {
+              if (trData.code === 'MISSING_API_KEY' || trData.code === 'API_KEY_INVALID' || trData.code === 'PERMISSION_DENIED') {
+                throw new Error(trData.error);
+              }
+              console.warn('Transcription step notice:', trData.error);
+            } else {
+              video = {
+                ...video,
+                transcript: video.transcript || trData.transcript || '',
+                visualSummary: video.visualSummary || trData.visualSummary || '',
+                duration: trData.duration || video.duration,
+              };
+              setCurrentVideo(video);
             }
-            console.warn('Transcription step notice:', trData.error);
-          } else {
-            video = {
-              ...video,
-              transcript: video.transcript || trData.transcript || '',
-              visualSummary: video.visualSummary || trData.visualSummary || '',
-              duration: trData.duration || video.duration,
-            };
-            setCurrentVideo(video);
+          } catch (step2Err: any) {
+            if (
+              step2Err?.message?.includes('GEMINI_API_KEY') ||
+              step2Err?.message?.includes('permission denied')
+            ) {
+              throw step2Err;
+            }
+            console.warn('Non-fatal Step 2 notice, continuing to highlight analysis:', step2Err?.message);
           }
         }
       }
@@ -595,6 +1094,7 @@ export default function App() {
             : [],
           chapters,
         }),
+        signal: AbortSignal.timeout(45000),
       });
 
       const data = await parseJsonResponse(response, 'Gemini highlight detection failed');
@@ -643,6 +1143,7 @@ export default function App() {
           youtubeDownloadBlocked: Boolean(video.youtubeDownloadBlocked),
           clips: finalClips,
         }),
+        signal: AbortSignal.timeout(45000),
       });
 
       const autoData = await parseJsonResponse(autoRes, 'Auto-clipping failed');
@@ -660,10 +1161,6 @@ export default function App() {
         throw new Error(autoData.error || 'Server could not render 9:16 MP4 clips from this video URL.');
       }
 
-      if (video.sourceType === 'youtube' && !video.playableSourceUrl && finalClips[0]?.clipVideoUrl) {
-        video.videoUrl = finalClips[0].clipVideoUrl;
-      }
-
       const combinedClips = appendMode ? [...existingHighlights, ...finalClips] : finalClips;
 
       video = {
@@ -676,6 +1173,8 @@ export default function App() {
       setProcessingStep('Done! Opening Clips Feed...');
 
       const finishUpdate = () => {
+        setHasActiveEditSession(true);
+        setDraftBannerDismissed(true);
         setCurrentVideo(video);
         const focusClip = finalClips[0] || combinedClips[0];
         if (focusClip && !appendMode) {
@@ -698,11 +1197,27 @@ export default function App() {
         if (!appendMode) {
           setAppMode('feed');
         }
-        showToast(
-          appendMode
-            ? `Added ${finalClips.length} new AI-clipped shorts!`
-            : `Extracted and clipped ${finalClips.length} 9:16 shorts with Gemini AI.`
-        );
+        if (!appendMode && options.autoExport?.enabled && finalClips.length > 0) {
+          const ae = options.autoExport;
+          setExportInitialPlatform(ae.platform);
+          setExportInitialSelectedClipIds(finalClips.map((c) => c.id));
+          setExportInitialMode(ae.mode === 'reel' && finalClips.length >= 2 ? 'reel' : 'batch');
+          setExportInitialResolution(ae.resolution);
+          setExportInitialBurnCaptions(ae.burnCaptions);
+          setExportAutoStartNonce((n) => n + 1);
+          setIsExportModalOpen(true);
+          showToast(
+            `Clipping finished! Instantly exporting ${finalClips.length} clip${
+              finalClips.length > 1 ? 's' : ''
+            } for ${PLATFORM_PRESETS[ae.platform].label}...`
+          );
+        } else {
+          showToast(
+            appendMode
+              ? `Added ${finalClips.length} new AI-clipped shorts!`
+              : `Extracted and clipped ${finalClips.length} 9:16 shorts with Gemini AI.`
+          );
+        }
       };
 
       if (appendMode) {
@@ -826,9 +1341,20 @@ export default function App() {
         currentVideo={currentVideo}
         activeClip={activeClip}
         appMode={appMode}
-        onSetAppMode={setAppMode}
+        onSetAppMode={(nextMode) => {
+          if (nextMode === 'feed' || nextMode === 'studio') {
+            setHasActiveEditSession(true);
+          }
+          setAppMode(nextMode);
+        }}
         onOpenImportModal={() => setIsImportModalOpen(true)}
-        onOpenExportModal={() => setIsExportModalOpen(true)}
+        onOpenExportModal={() => {
+          setExportInitialSelectedClipIds(activeClip ? [activeClip.id] : undefined);
+          setExportInitialMode('batch');
+          setExportInitialResolution(undefined);
+          setExportInitialBurnCaptions(undefined);
+          setIsExportModalOpen(true);
+        }}
         onQuickExportPlatform={
           appMode !== 'generator' && activeClip
             ? (platform) => handleQuickExportPlatform(platform)
@@ -845,7 +1371,65 @@ export default function App() {
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 flex flex-col min-h-0">
         {/* Mode 1: Generator Landing */}
         {appMode === 'generator' && (
-          <div className="flex-1 flex flex-col justify-center max-w-4xl mx-auto w-full py-4">
+          <div className="flex-1 flex flex-col justify-center max-w-4xl mx-auto w-full py-4 space-y-4">
+            {draftLoaded && savedDraft && !draftBannerDismissed && !isProcessing && (
+              <div className="rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-start sm:items-center gap-3 min-w-0">
+                  <div className="w-9 h-9 rounded-lg bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-300 shrink-0">
+                    <RotateCcw className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-zinc-100">
+                      <span>Resume Auto-Draft: {savedDraft.clip.title}</span>
+                      <span className="text-[10px] font-mono font-normal text-emerald-300">
+                        {lastDraftSavedAt
+                          ? `Saved ${new Date(lastDraftSavedAt).toLocaleTimeString([], {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}`
+                          : 'Saved'}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-zinc-400 truncate">
+                      {savedDraft.video.title} ·{' '}
+                      {Math.max(1, Math.round(savedDraft.clip.endTime - savedDraft.clip.startTime))}s ·{' '}
+                      {user ? 'Synced to Firestore' : 'Saved on this browser'}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {!user && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        signInWithGoogle().catch(() => {});
+                      }}
+                      className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs font-medium cursor-pointer transition-colors"
+                    >
+                      <Cloud className="w-3.5 h-3.5 text-violet-400" />
+                      <span>Cloud Sync</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleDiscardDraft}
+                    className="p-1.5 rounded-lg text-zinc-400 hover:text-rose-300 hover:bg-zinc-900/70 transition-colors cursor-pointer"
+                    title="Discard saved draft"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleResumeDraft}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-semibold cursor-pointer transition-colors"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>Resume Editing</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             <OpusClipHero
               onGenerateClips={handleGenerateClips}
               isProcessing={isProcessing}
@@ -866,11 +1450,23 @@ export default function App() {
               settings={settings}
               onUpdateSettings={handleUpdateSettings}
               onSelectClipToEdit={handleSelectClipToEdit}
-              onOpenExportModal={(clip, platform) => {
-                if (platform) {
+              onOpenExportModal={(clip, platform, selectedClipIds, exportMode, autoStart) => {
+                if (platform && !autoStart) {
                   handleQuickExportPlatform(platform, clip);
                 } else {
                   handleSelectClip(clip);
+                  if (platform) {
+                    setExportInitialPlatform(platform);
+                  }
+                  setExportInitialSelectedClipIds(
+                    selectedClipIds && selectedClipIds.length > 0 ? selectedClipIds : [clip.id]
+                  );
+                  setExportInitialMode(exportMode || 'batch');
+                  setExportInitialResolution(undefined);
+                  setExportInitialBurnCaptions(undefined);
+                  if (autoStart) {
+                    setExportAutoStartNonce((n) => n + 1);
+                  }
                   setIsExportModalOpen(true);
                 }
               }}
@@ -919,6 +1515,44 @@ export default function App() {
                   <span>Active Clip:</span>
                   <span className="text-zinc-200 font-semibold truncate">{activeClip.title}</span>
                 </div>
+
+                {!user && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      signInWithGoogle().catch(() => {});
+                    }}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-700 text-xs font-medium transition-colors cursor-pointer"
+                    title="Sign in with Google to save Auto-Drafts to Firestore"
+                  >
+                    <Cloud className="w-3.5 h-3.5 text-violet-400" />
+                    <span>Sync Drafts</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleManualSaveDraft}
+                  disabled={isSavingDraft}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-700 text-xs font-medium transition-colors cursor-pointer disabled:opacity-50"
+                  title="Auto-Draft saves every 30s — click to save immediately"
+                >
+                  {isSavingDraft ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+                  ) : (
+                    <Save className="w-3.5 h-3.5 text-emerald-400" />
+                  )}
+                  <span>
+                    {isSavingDraft
+                      ? 'Saving...'
+                      : lastDraftSavedAt
+                      ? `Draft ${new Date(lastDraftSavedAt).toLocaleTimeString([], {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}`
+                      : 'Save Draft'}
+                  </span>
+                </button>
 
                 <button
                   onClick={() => handleStudioAiBoost(activeClip)}
@@ -986,11 +1620,17 @@ export default function App() {
                     youtubeVideoId={currentVideo.youtubeVideoId}
                     youtubeDownloadBlocked={currentVideo.youtubeDownloadBlocked}
                     thumbnail={currentVideo.thumbnail}
+                    totalVideoDuration={currentVideo.duration}
                     activeClip={activeClip}
                     settings={settings}
                     onUpdateSettings={handleUpdateSettings}
                     videoRef={videoRef}
                     onTimeUpdate={(t) => setCurrentTime(t)}
+                    onSeekSourceTime={seekSourcePlayhead}
+                    onSetInPoint={() => handleSetTrimMarkerFromPlayhead('in')}
+                    onSetOutPoint={() => handleSetTrimMarkerFromPlayhead('out')}
+                    trimFeedback={trimFeedback}
+                    playToggleNonce={playToggleNonce}
                   />
                 </div>
 
@@ -1001,6 +1641,12 @@ export default function App() {
                     currentTime={currentTime}
                     onUpdateClipTime={handleUpdateClipTime}
                     onSeek={handleSeek}
+                    onSetInPoint={() => handleSetTrimMarkerFromPlayhead('in')}
+                    onSetOutPoint={() => handleSetTrimMarkerFromPlayhead('out')}
+                    onUndoTrim={handleUndoTrim}
+                    canUndoTrim={trimHistoryCount > 0}
+                    syncCaptionsOnTrim={syncCaptionsOnTrim}
+                    onToggleSyncCaptions={() => setSyncCaptionsOnTrim((v) => !v)}
                   />
                 </div>
               </section>
@@ -1109,6 +1755,10 @@ export default function App() {
         settings={settings}
         videoRef={videoRef}
         initialPlatform={exportInitialPlatform}
+        initialSelectedClipIds={exportInitialSelectedClipIds}
+        initialExportMode={exportInitialMode}
+        initialResolution={exportInitialResolution}
+        initialBurnCaptions={exportInitialBurnCaptions}
         autoStartNonce={exportAutoStartNonce}
         onManageAccounts={(platform) => {
           setIsExportModalOpen(false);

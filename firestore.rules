@@ -35,6 +35,23 @@ service cloud.firestore {
       return val is string && val.size() <= 500 && (val == '' || val.matches('^https?://.*'));
     }
 
+    function isSafeVideoPathOrUrl(val) {
+      return val is string && val.size() <= 1000 && (
+        val == '' ||
+        val.matches('^https?://.*') ||
+        val.matches('^/[^/].*')
+      );
+    }
+
+    function isSafeThumbnailUrl(val) {
+      return val is string && val.size() <= 1000 && (
+        val == '' ||
+        val.matches('^https?://.*') ||
+        val.matches('^/[^/].*') ||
+        val.matches('^data:image/(png|jpeg|jpg|webp);base64,[a-zA-Z0-9+/=]+$')
+      );
+    }
+
     function hasParentUser(userId) {
       return exists(/databases/$(database)/documents/users/$(userId)) ||
         existsAfter(/databases/$(database)/documents/users/$(userId));
@@ -140,6 +157,140 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
 
+    function isValidDraftVideo(v) {
+      return v is map &&
+        v.keys().hasAll([
+          'id', 'title', 'creator', 'channelName', 'duration', 'thumbnail',
+          'videoUrl', 'playableSourceUrl', 'sourceType', 'youtubeUrl',
+          'youtubeVideoId', 'youtubeDownloadBlocked', 'description', 'transcript'
+        ]) &&
+        v.keys().hasOnly([
+          'id', 'title', 'creator', 'channelName', 'duration', 'thumbnail',
+          'videoUrl', 'playableSourceUrl', 'sourceType', 'youtubeUrl',
+          'youtubeVideoId', 'youtubeDownloadBlocked', 'description', 'transcript'
+        ]) &&
+        v.id is string && v.id.size() >= 1 && v.id.size() <= 128 &&
+        v.title is string && v.title.size() >= 1 && v.title.size() <= 200 &&
+        v.creator is string && v.creator.size() <= 120 &&
+        v.channelName is string && v.channelName.size() <= 120 &&
+        v.duration is number && v.duration >= 0 && v.duration <= 86400 &&
+        isSafeThumbnailUrl(v.thumbnail) &&
+        isSafeVideoPathOrUrl(v.videoUrl) &&
+        isSafeVideoPathOrUrl(v.playableSourceUrl) &&
+        v.sourceType in ['youtube', 'upload', 'sample', 'url'] &&
+        isValidHttpUrl(v.youtubeUrl) &&
+        v.youtubeVideoId is string && v.youtubeVideoId.size() <= 64 &&
+        v.youtubeDownloadBlocked is bool &&
+        v.description is string && v.description.size() <= 2000 &&
+        v.transcript is string && v.transcript.size() <= 8000;
+    }
+
+    function isValidDraftClip(c) {
+      return c is map &&
+        c.keys().hasAll([
+          'id', 'title', 'hook', 'reason', 'category', 'startTime', 'endTime',
+          'viralityScore', 'framingSuggestion', 'panX', 'emojis', 'hashtags',
+          'captions', 'clipVideoUrl', 'downloadUrl'
+        ]) &&
+        c.keys().hasOnly([
+          'id', 'title', 'hook', 'reason', 'category', 'startTime', 'endTime',
+          'viralityScore', 'framingSuggestion', 'panX', 'emojis', 'hashtags',
+          'captions', 'clipVideoUrl', 'downloadUrl'
+        ]) &&
+        c.id is string && c.id.size() >= 1 && c.id.size() <= 128 &&
+        c.title is string && c.title.size() >= 1 && c.title.size() <= 200 &&
+        c.hook is string && c.hook.size() <= 500 &&
+        c.reason is string && c.reason.size() <= 1000 &&
+        c.category in ['funny', 'highlight', 'educational', 'debate'] &&
+        c.startTime is number && c.startTime >= 0 && c.startTime <= 86400 &&
+        c.endTime is number && c.endTime >= 0 && c.endTime <= 86400 &&
+        c.viralityScore is int && c.viralityScore >= 0 && c.viralityScore <= 100 &&
+        c.framingSuggestion in ['smart_crop', 'split_screen', 'blur_fit', 'clean_box'] &&
+        c.panX is number && c.panX >= -100 && c.panX <= 100 &&
+        c.emojis is list && c.emojis.size() <= 15 &&
+        (c.emojis.size() == 0 || (c.emojis[0] is string && c.emojis[0].size() <= 16)) &&
+        c.hashtags is list && c.hashtags.size() <= 20 &&
+        (c.hashtags.size() == 0 || (c.hashtags[0] is string && c.hashtags[0].size() <= 64)) &&
+        c.captions is list && c.captions.size() <= 300 &&
+        (c.captions.size() == 0 || (
+          c.captions[0] is map &&
+          c.captions[0].keys().hasOnly(['start', 'end', 'text', 'emphasisWord', 'words']) &&
+          c.captions[0].text is string && c.captions[0].text.size() <= 500 &&
+          c.captions[0].start is number && c.captions[0].end is number
+        )) &&
+        isSafeVideoPathOrUrl(c.clipVideoUrl) &&
+        isSafeVideoPathOrUrl(c.downloadUrl);
+    }
+
+    function isValidDraftSettings(s) {
+      return s is map &&
+        s.keys().hasAll([
+          'resolution', 'framerate', 'framingMode', 'captionPreset',
+          'captionHighlightStyle', 'captionColor', 'captionBaseColor',
+          'captionFontFamily', 'captionTextCase', 'captionOutlineWidth',
+          'captionWordsPerLine', 'captionDropShadow', 'captionPosition',
+          'captionFontSize', 'captionEntranceAnim', 'captionExitAnim',
+          'showHookBanner', 'hookBannerText', 'showProgressBar',
+          'progressBarColor', 'panX', 'videoFilter', 'filterBrightness',
+          'filterContrast', 'filterSaturate', 'playbackSpeed', 'normalizeAudio'
+        ]) &&
+        s.keys().hasOnly([
+          'resolution', 'framerate', 'framingMode', 'captionPreset',
+          'captionHighlightStyle', 'captionColor', 'captionBaseColor',
+          'captionFontFamily', 'captionTextCase', 'captionOutlineWidth',
+          'captionWordsPerLine', 'captionDropShadow', 'captionPosition',
+          'captionFontSize', 'captionEntranceAnim', 'captionExitAnim',
+          'showHookBanner', 'hookBannerText', 'showProgressBar',
+          'progressBarColor', 'panX', 'videoFilter', 'filterBrightness',
+          'filterContrast', 'filterSaturate', 'playbackSpeed', 'normalizeAudio'
+        ]) &&
+        s.resolution in ['1080p', '720p'] &&
+        s.framerate in [30, 60] &&
+        s.framingMode in ['smart_crop', 'split_screen', 'blur_fit', 'clean_box'] &&
+        s.captionPreset is string && s.captionPreset.size() <= 64 &&
+        s.captionHighlightStyle is string && s.captionHighlightStyle.size() <= 32 &&
+        s.captionColor is string && s.captionColor.size() <= 32 &&
+        s.captionBaseColor is string && s.captionBaseColor.size() <= 32 &&
+        s.captionFontFamily is string && s.captionFontFamily.size() <= 64 &&
+        s.captionTextCase is string && s.captionTextCase.size() <= 32 &&
+        s.captionOutlineWidth is number && s.captionOutlineWidth >= 0 && s.captionOutlineWidth <= 24 &&
+        s.captionWordsPerLine is string && s.captionWordsPerLine.size() <= 32 &&
+        s.captionDropShadow is bool &&
+        s.captionPosition in ['top', 'middle', 'lower_third', 'bottom'] &&
+        s.captionFontSize is number && s.captionFontSize >= 8 && s.captionFontSize <= 120 &&
+        s.captionEntranceAnim is string && s.captionEntranceAnim.size() <= 32 &&
+        s.captionExitAnim is string && s.captionExitAnim.size() <= 32 &&
+        s.showHookBanner is bool &&
+        s.hookBannerText is string && s.hookBannerText.size() <= 200 &&
+        s.showProgressBar is bool &&
+        s.progressBarColor is string && s.progressBarColor.size() <= 32 &&
+        s.panX is number && s.panX >= -100 && s.panX <= 100 &&
+        s.videoFilter is string && s.videoFilter.size() <= 32 &&
+        s.filterBrightness is number && s.filterBrightness >= 0 && s.filterBrightness <= 300 &&
+        s.filterContrast is number && s.filterContrast >= 0 && s.filterContrast <= 300 &&
+        s.filterSaturate is number && s.filterSaturate >= 0 && s.filterSaturate <= 300 &&
+        s.playbackSpeed is number && s.playbackSpeed >= 0.5 && s.playbackSpeed <= 2.0 &&
+        s.normalizeAudio is bool;
+    }
+
+    function isValidClipDraft(data, userId, draftId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'appMode', 'currentTime', 'video', 'clip', 'settings', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'userId', 'appMode', 'currentTime', 'video', 'clip', 'settings', 'createdAt', 'updatedAt'
+        ]) &&
+        data.id is string && data.id == draftId && isValidId(data.id) &&
+        data.userId is string && data.userId == userId && data.userId == request.auth.uid &&
+        data.appMode in ['feed', 'studio'] &&
+        data.currentTime is number && data.currentTime >= 0 && data.currentTime <= 86400 &&
+        isValidDraftVideo(data.video) &&
+        isValidDraftClip(data.clip) &&
+        isValidDraftSettings(data.settings) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
     match /users/{userId} {
       allow get: if isVerifiedOwner(userId) && isValidId(userId);
       allow list: if false;
@@ -237,6 +388,29 @@ service cloud.firestore {
             'captionHighlightStyle', 'videoFilter', 'updatedAt'
           ]);
         allow delete: if false;
+      }
+
+      match /clipDrafts/{draftId} {
+        allow get: if isVerifiedOwner(userId) && isValidId(draftId);
+        allow list: if isVerifiedOwner(userId) && existing().userId == request.auth.uid;
+        allow create: if isVerifiedOwner(userId) &&
+          isValidId(draftId) &&
+          isValidClipDraft(incoming(), userId, draftId) &&
+          hasParentUser(userId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isVerifiedOwner(userId) &&
+          isValidId(draftId) &&
+          isValidClipDraft(incoming(), userId, draftId) &&
+          hasParentUser(userId) &&
+          incoming().id == existing().id &&
+          incoming().userId == existing().userId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'appMode', 'currentTime', 'video', 'clip', 'settings', 'updatedAt'
+          ]);
+        allow delete: if isVerifiedOwner(userId) && isValidId(draftId);
       }
     }
   }

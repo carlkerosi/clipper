@@ -96,4 +96,19 @@ export const DIRTY_DOZEN_PAYLOADS = [
     payload: { views: -50 },
     expected: 'PERMISSION_DENIED',
   },
+  {
+    name: 'cross_user_read_clip_draft',
+    path: '/users/victim_uid/clipDrafts/active_draft',
+    operation: 'get',
+    auth: { uid: 'attacker_uid', email_verified: true },
+    expected: 'PERMISSION_DENIED',
+  },
+  {
+    name: 'shadow_field_injection_clip_draft_update',
+    path: '/users/user_1/clipDrafts/active_draft',
+    operation: 'update',
+    auth: { uid: 'user_1', email_verified: true },
+    payload: { appMode: 'studio', extraSecret: true },
+    expected: 'PERMISSION_DENIED',
+  },
 ];

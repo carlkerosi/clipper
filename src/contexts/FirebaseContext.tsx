@@ -1,4 +1,12 @@
-import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useEffect,
+  useState,
+  useCallback,
+  useRef,
+  useMemo,
+} from 'react';
 import {
   User,
   onAuthStateChanged,
@@ -27,19 +35,26 @@ import {
 } from '../firebase';
 import {
   AccountConnectionType,
+  CaptionChunk,
   CaptionHighlightStyle,
   CaptionPreset,
+  ClipDraft,
+  ClipDraftVideoSummary,
+  ClipHighlight,
   ClipPublishStatus,
+  ExportSettings,
   PublishedClipRecord,
   SocialAccount,
   SocialPlatform,
   VideoFilterPreset,
+  VideoSource,
   WorkspacePreferences,
 } from '../types';
 import {
   normalizeSocialProfileUrl,
   parseSocialHandleAndUrl,
 } from '../utils/platformExport';
+import { parseJsonResponse } from '../utils/safeFetchJson';
 
 export interface AddSocialAccountInput {
   platform: SocialPlatform;
@@ -104,6 +119,14 @@ export const DEFAULT_WORKSPACE_PREFS: WorkspacePreferencesValues = {
   videoFilter: 'none',
 };
 
+export interface SaveClipDraftInput {
+  appMode: 'feed' | 'studio';
+  currentTime: number;
+  video: VideoSource;
+  clip: ClipHighlight;
+  settings: ExportSettings;
+}
+
 interface FirebaseContextValue {
   user: User | null;
   authReady: boolean;
@@ -115,6 +138,10 @@ interface FirebaseContextValue {
   publishedClips: PublishedClipRecord[];
   workspacePrefs: WorkspacePreferences;
   workspacePrefsLoaded: boolean;
+  savedDraft: ClipDraft | null;
+  draftLoaded: boolean;
+  isSavingDraft: boolean;
+  lastDraftSavedAt: string | null;
   signInWithGoogle: () => Promise<User | null>;
   signOutUser: () => Promise<void>;
   getDefaultAccountForPlatform: (platform: SocialPlatform) => SocialAccount | undefined;
@@ -130,6 +157,9 @@ interface FirebaseContextValue {
   deletePublishedClip: (recordId: string) => Promise<void>;
   updateWorkspacePrefs: (patch: Partial<WorkspacePreferencesValues>) => Promise<void>;
   autoApplyPrimaryAccountsToClips: () => Promise<number>;
+  refreshSessionAccounts: () => Promise<SocialAccount[]>;
+  saveClipDraft: (input: SaveClipDraftInput) => Promise<ClipDraft | null>;
+  clearClipDraft: () => Promise<void>;
 }
 
 const FirebaseContext = createContext<FirebaseContextValue | undefined>(undefined);
@@ -137,6 +167,8 @@ const FirebaseContext = createContext<FirebaseContextValue | undefined>(undefine
 const LOCAL_ACCOUNTS_KEY = 'clipforge_local_accounts_v1';
 const LOCAL_CLIPS_KEY = 'clipforge_local_clips_v1';
 const LOCAL_PREFS_KEY = 'clipforge_local_prefs_v1';
+const LOCAL_DRAFT_KEY = 'clipforge_local_draft_v1';
+const ACTIVE_DRAFT_ID = 'active_draft';
 
 function loadLocalJson<T>(key: string, fallback: T): T {
   if (typeof window === 'undefined') return fallback;
@@ -189,17 +221,183 @@ function timestampToMs(ts: any): number {
   return 0;
 }
 
+function clampNum(val: unknown, min: number, max: number, fallback: number): number {
+  const n = Number(val);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function sanitizeSafeMediaPathOrUrl(val: unknown, maxLen = 1000): string {
+  const s = typeof val === 'string' ? val.trim() : '';
+  if (!s || s.length > maxLen) return '';
+  if (/^https?:\/\//i.test(s)) return s;
+  if (/^\/[^/]/.test(s)) return s;
+  return '';
+}
+
+function sanitizeSafeThumbnailUrl(val: unknown, maxLen = 1000): string {
+  const s = typeof val === 'string' ? val.trim() : '';
+  if (!s || s.length > maxLen) return '';
+  if (/^https?:\/\//i.test(s)) return s;
+  if (/^\/[^/]/.test(s)) return s;
+  if (/^data:image\/(png|jpeg|jpg|webp);base64,[a-zA-Z0-9+/=]+$/i.test(s)) return s;
+  return '';
+}
+
+function sanitizeDraftVideoSummary(video: VideoSource | ClipDraftVideoSummary): ClipDraftVideoSummary {
+  const sourceType =
+    video?.sourceType === 'youtube' ||
+    video?.sourceType === 'upload' ||
+    video?.sourceType === 'sample' ||
+    video?.sourceType === 'url'
+      ? video.sourceType
+      : 'sample';
+  return {
+    id: sanitizeText(video?.id, 128, `vid_${Date.now()}`),
+    title: sanitizeText(video?.title, 200, 'Untitled Video'),
+    creator: sanitizeText(video?.creator, 120, 'Creator'),
+    channelName: sanitizeText(video?.channelName, 120, ''),
+    duration: Math.round(clampNum(video?.duration, 0, 86400, 60) * 10) / 10,
+    thumbnail: sanitizeSafeThumbnailUrl(video?.thumbnail, 1000),
+    videoUrl: sanitizeSafeMediaPathOrUrl(video?.videoUrl, 1000),
+    playableSourceUrl: sanitizeSafeMediaPathOrUrl(video?.playableSourceUrl, 1000),
+    sourceType,
+    youtubeUrl: sanitizeHttpUrl(video?.youtubeUrl),
+    youtubeVideoId: sanitizeText(video?.youtubeVideoId, 64, ''),
+    youtubeDownloadBlocked: Boolean(video?.youtubeDownloadBlocked),
+    description: sanitizeText(video?.description, 2000, ''),
+    transcript: sanitizeText(video?.transcript, 8000, ''),
+  };
+}
+
+function sanitizeDraftClip(clip: ClipHighlight): ClipHighlight {
+  const category =
+    clip?.category === 'funny' ||
+    clip?.category === 'highlight' ||
+    clip?.category === 'educational' ||
+    clip?.category === 'debate'
+      ? clip.category
+      : 'highlight';
+  const framingSuggestion =
+    clip?.framingSuggestion === 'smart_crop' ||
+    clip?.framingSuggestion === 'split_screen' ||
+    clip?.framingSuggestion === 'blur_fit' ||
+    clip?.framingSuggestion === 'clean_box'
+      ? clip.framingSuggestion
+      : 'smart_crop';
+
+  const startTime = Math.round(clampNum(clip?.startTime, 0, 86400, 0) * 10) / 10;
+  const endTime = Math.round(clampNum(clip?.endTime, startTime, 86400, startTime + 15) * 10) / 10;
+
+  const emojis = (Array.isArray(clip?.emojis) ? clip.emojis : [])
+    .filter((e): e is string => typeof e === 'string' && e.trim().length > 0)
+    .slice(0, 15)
+    .map((e) => e.trim().slice(0, 16));
+
+  const hashtags = (Array.isArray(clip?.hashtags) ? clip.hashtags : [])
+    .filter((t): t is string => typeof t === 'string' && t.trim().length > 0)
+    .slice(0, 20)
+    .map((t) => t.trim().slice(0, 64));
+
+  const captions: CaptionChunk[] = (Array.isArray(clip?.captions) ? clip.captions : [])
+    .filter((c) => c && typeof c.text === 'string')
+    .slice(0, 300)
+    .map((c) => {
+      const cStart = Math.round(clampNum(c.start, 0, 86400, 0) * 100) / 100;
+      const cEnd = Math.round(clampNum(c.end, cStart, 86400, cStart + 1) * 100) / 100;
+      const chunk: CaptionChunk = {
+        start: cStart,
+        end: cEnd,
+        text: c.text.trim().slice(0, 500) || ' ',
+      };
+      if (typeof c.emphasisWord === 'string' && c.emphasisWord.trim()) {
+        chunk.emphasisWord = c.emphasisWord.trim().slice(0, 80);
+      }
+      return chunk;
+    });
+
+  return {
+    id: sanitizeText(clip?.id, 128, `clip_${Date.now()}`),
+    title: sanitizeText(clip?.title, 200, 'Untitled Clip'),
+    hook: sanitizeText(clip?.hook, 500, ''),
+    reason: sanitizeText(clip?.reason, 1000, ''),
+    category,
+    startTime,
+    endTime,
+    viralityScore: sanitizeInt(clip?.viralityScore, 100),
+    framingSuggestion,
+    panX: Math.round(clampNum(clip?.panX, -100, 100, 0)),
+    emojis,
+    hashtags,
+    captions,
+    clipVideoUrl: sanitizeSafeMediaPathOrUrl(clip?.clipVideoUrl, 1000),
+    downloadUrl: sanitizeSafeMediaPathOrUrl(clip?.downloadUrl, 1000),
+  };
+}
+
+function sanitizeDraftSettings(settings: ExportSettings): ExportSettings {
+  const framingMode =
+    settings?.framingMode === 'smart_crop' ||
+    settings?.framingMode === 'split_screen' ||
+    settings?.framingMode === 'blur_fit' ||
+    settings?.framingMode === 'clean_box'
+      ? settings.framingMode
+      : 'smart_crop';
+  const captionPosition =
+    settings?.captionPosition === 'top' ||
+    settings?.captionPosition === 'middle' ||
+    settings?.captionPosition === 'lower_third' ||
+    settings?.captionPosition === 'bottom'
+      ? settings.captionPosition
+      : 'lower_third';
+
+  return {
+    resolution: settings?.resolution === '720p' ? '720p' : '1080p',
+    framerate: settings?.framerate === 60 ? 60 : 30,
+    framingMode,
+    captionPreset: (sanitizeText(settings?.captionPreset, 64, 'opus_box') as CaptionPreset),
+    captionHighlightStyle: (sanitizeText(
+      settings?.captionHighlightStyle,
+      32,
+      'active_box'
+    ) as CaptionHighlightStyle),
+    captionColor: sanitizeText(settings?.captionColor, 32, '#22C55E'),
+    captionBaseColor: sanitizeText(settings?.captionBaseColor, 32, '#FFFFFF'),
+    captionFontFamily: sanitizeText(settings?.captionFontFamily, 64, 'Montserrat') as any,
+    captionTextCase: sanitizeText(settings?.captionTextCase, 32, 'uppercase') as any,
+    captionOutlineWidth: clampNum(settings?.captionOutlineWidth, 0, 24, 6),
+    captionWordsPerLine: sanitizeText(settings?.captionWordsPerLine, 32, 'multi_line') as any,
+    captionDropShadow: settings?.captionDropShadow !== false,
+    captionPosition,
+    captionFontSize: clampNum(settings?.captionFontSize, 8, 120, 32),
+    captionEntranceAnim: sanitizeText(settings?.captionEntranceAnim, 32, 'pop') as any,
+    captionExitAnim: sanitizeText(settings?.captionExitAnim, 32, 'fade') as any,
+    showHookBanner: Boolean(settings?.showHookBanner),
+    hookBannerText: sanitizeText(settings?.hookBannerText, 200, ''),
+    showProgressBar: settings?.showProgressBar !== false,
+    progressBarColor: sanitizeText(settings?.progressBarColor, 32, '#22C55E'),
+    panX: Math.round(clampNum(settings?.panX, -100, 100, 0)),
+    videoFilter: sanitizeText(settings?.videoFilter, 32, 'none') as VideoFilterPreset,
+    filterBrightness: clampNum(settings?.filterBrightness, 0, 300, 100),
+    filterContrast: clampNum(settings?.filterContrast, 0, 300, 100),
+    filterSaturate: clampNum(settings?.filterSaturate, 0, 300, 100),
+    playbackSpeed: clampNum(settings?.playbackSpeed, 0.5, 2.0, 1),
+    normalizeAudio: Boolean(settings?.normalizeAudio),
+  };
+}
+
 export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [isLoadingData, setIsLoadingData] = useState(false);
-  const [socialAccounts, setSocialAccounts] = useState<SocialAccount[]>(() =>
+  const [workspaceAccounts, setWorkspaceAccounts] = useState<SocialAccount[]>(() =>
     loadLocalJson<SocialAccount[]>(LOCAL_ACCOUNTS_KEY, []).filter(
       (a) => a.platform === 'shorts' || a.platform === 'tiktok'
     )
   );
+  const [sessionOAuthAccounts, setSessionOAuthAccounts] = useState<SocialAccount[]>([]);
   const [publishedClips, setPublishedClips] = useState<PublishedClipRecord[]>(() =>
     loadLocalJson<PublishedClipRecord[]>(LOCAL_CLIPS_KEY, []).filter(
       (c) => c.platform === 'shorts' || c.platform === 'tiktok'
@@ -212,16 +410,74 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     ...loadLocalJson<Partial<WorkspacePreferencesValues>>(LOCAL_PREFS_KEY, {}),
   }));
   const [workspacePrefsLoaded, setWorkspacePrefsLoaded] = useState(true);
+  const [savedDraft, setSavedDraft] = useState<ClipDraft | null>(() =>
+    loadLocalJson<ClipDraft | null>(LOCAL_DRAFT_KEY, null)
+  );
+  const [draftLoaded, setDraftLoaded] = useState(false);
+  const [isSavingDraft, setIsSavingDraft] = useState(false);
+  const [lastDraftSavedAt, setLastDraftSavedAt] = useState<string | null>(() => {
+    const localDraft = loadLocalJson<ClipDraft | null>(LOCAL_DRAFT_KEY, null);
+    return typeof localDraft?.updatedAt === 'string' ? localDraft.updatedAt : null;
+  });
+
+  const socialAccounts = useMemo(() => {
+    const merged: SocialAccount[] = [];
+    const seenKeys = new Set<string>();
+    sessionOAuthAccounts.forEach((acc) => {
+      const normalized: SocialAccount = {
+        ...acc,
+        connectionType: 'oauth',
+        storageSource: 'oauth_session',
+      };
+      seenKeys.add(`${acc.platform}:${acc.handle.trim().toLowerCase()}`);
+      merged.push(normalized);
+    });
+    workspaceAccounts.forEach((acc) => {
+      const key = `${acc.platform}:${acc.handle.trim().toLowerCase()}`;
+      if (seenKeys.has(key)) return;
+      merged.push({
+        ...acc,
+        storageSource: user ? 'firebase' : 'local',
+      });
+    });
+    return merged;
+  }, [sessionOAuthAccounts, workspaceAccounts, user]);
 
   const profileReadyUidRef = useRef<string | null>(null);
   const hasWorkspacePrefsDocRef = useRef<boolean>(false);
+  const hasDraftDocRef = useRef<boolean>(false);
   const migratedLocalUidRef = useRef<string | null>(null);
   const workspacePrefsRef = useRef<WorkspacePreferences>(workspacePrefs);
   workspacePrefsRef.current = workspacePrefs;
+  const workspaceAccountsRef = useRef<SocialAccount[]>(workspaceAccounts);
+  workspaceAccountsRef.current = workspaceAccounts;
   const socialAccountsRef = useRef<SocialAccount[]>(socialAccounts);
   socialAccountsRef.current = socialAccounts;
   const publishedClipsRef = useRef<PublishedClipRecord[]>(publishedClips);
   publishedClipsRef.current = publishedClips;
+
+  const refreshSessionAccounts = useCallback(async (): Promise<SocialAccount[]> => {
+    try {
+      const res = await fetch('/api/social/session-accounts', {
+        credentials: 'same-origin',
+      });
+      const data = await parseJsonResponse(res, 'Could not load social login session');
+      if (res.ok && Array.isArray(data.accounts)) {
+        const clean = (data.accounts as SocialAccount[]).filter(
+          (a) => a.platform === 'shorts' || a.platform === 'tiktok'
+        );
+        setSessionOAuthAccounts(clean);
+        return clean;
+      }
+    } catch {
+      // Non-fatal if offline
+    }
+    return [];
+  }, []);
+
+  useEffect(() => {
+    refreshSessionAccounts();
+  }, [refreshSessionAccounts]);
 
   const ensureUserDocument = useCallback(async (u: User) => {
     const userPath = `users/${u.uid}`;
@@ -259,6 +515,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     let unsubAccounts: (() => void) | null = null;
     let unsubClips: (() => void) | null = null;
     let unsubPrefs: (() => void) | null = null;
+    let unsubDrafts: (() => void) | null = null;
 
     const unsubAuth = onAuthStateChanged(auth, async (currentUser) => {
       if (unsubAccounts) {
@@ -273,6 +530,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         unsubPrefs();
         unsubPrefs = null;
       }
+      if (unsubDrafts) {
+        unsubDrafts();
+        unsubDrafts = null;
+      }
 
       setUser(currentUser);
       setAuthReady(true);
@@ -280,6 +541,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (!currentUser) {
         profileReadyUidRef.current = null;
         hasWorkspacePrefsDocRef.current = false;
+        hasDraftDocRef.current = false;
         migratedLocalUidRef.current = null;
 
         const localAccs = loadLocalJson<SocialAccount[]>(LOCAL_ACCOUNTS_KEY, []).filter(
@@ -292,8 +554,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           LOCAL_PREFS_KEY,
           {}
         );
+        const localDraft = loadLocalJson<ClipDraft | null>(LOCAL_DRAFT_KEY, null);
 
-        setSocialAccounts(localAccs);
+        setWorkspaceAccounts(localAccs);
         setPublishedClips(localClips);
         setWorkspacePrefs({
           id: 'workspace',
@@ -302,6 +565,11 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           ...localPrefs,
         });
         setWorkspacePrefsLoaded(true);
+        setSavedDraft(localDraft);
+        setLastDraftSavedAt(
+          typeof localDraft?.updatedAt === 'string' ? localDraft.updatedAt : null
+        );
+        setDraftLoaded(true);
         setIsLoadingData(false);
         return;
       }
@@ -325,7 +593,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             .map((d) => d.data() as SocialAccount)
             .filter((a) => a.platform === 'shorts' || a.platform === 'tiktok');
           list.sort((a, b) => timestampToMs(b.createdAt) - timestampToMs(a.createdAt));
-          setSocialAccounts(list);
+          setWorkspaceAccounts(list);
           setIsLoadingData(false);
 
           // Automatically merge any manually added local accounts & clips once upon Google sign-in
@@ -509,6 +777,65 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           handleFirestoreError(error, OperationType.LIST, prefsPath);
         }
       );
+      const draftsPath = `users/${currentUser.uid}/clipDrafts`;
+      const draftsQuery = query(
+        collection(db, 'users', currentUser.uid, 'clipDrafts'),
+        where('userId', '==', currentUser.uid)
+      );
+      unsubDrafts = onSnapshot(
+        draftsQuery,
+        (snapshot) => {
+          const docs = snapshot.docs.map((d) => d.data() as ClipDraft);
+          docs.sort((a, b) => timestampToMs(b.updatedAt) - timestampToMs(a.updatedAt));
+          const activeDoc =
+            docs.find((d) => d.id === ACTIVE_DRAFT_ID) || docs[0] || null;
+
+          if (activeDoc) {
+            hasDraftDocRef.current = Boolean(docs.find((d) => d.id === ACTIVE_DRAFT_ID));
+            setSavedDraft(activeDoc);
+            const ms = timestampToMs(activeDoc.updatedAt);
+            if (ms > 0) {
+              setLastDraftSavedAt(new Date(ms).toISOString());
+            }
+          } else {
+            hasDraftDocRef.current = false;
+            // If a local draft exists from before sign-in, migrate it to Firestore automatically
+            const localDraft = loadLocalJson<ClipDraft | null>(LOCAL_DRAFT_KEY, null);
+            if (localDraft && localDraft.clip && localDraft.video) {
+              const draftRef = doc(db, 'users', currentUser.uid, 'clipDrafts', ACTIVE_DRAFT_ID);
+              const payload = {
+                id: ACTIVE_DRAFT_ID,
+                userId: currentUser.uid,
+                appMode: localDraft.appMode === 'feed' ? 'feed' : 'studio',
+                currentTime: Math.round(clampNum(localDraft.currentTime, 0, 86400, 0) * 10) / 10,
+                video: sanitizeDraftVideoSummary(localDraft.video),
+                clip: sanitizeDraftClip(localDraft.clip),
+                settings: sanitizeDraftSettings(localDraft.settings),
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              };
+              ensureUserDocument(currentUser)
+                .then(() => setDoc(draftRef, payload))
+                .then(() => {
+                  hasDraftDocRef.current = true;
+                  try {
+                    window.localStorage.removeItem(LOCAL_DRAFT_KEY);
+                  } catch {}
+                })
+                .catch((err) => {
+                  console.warn('Could not migrate local draft to Firestore:', err);
+                });
+            } else {
+              setSavedDraft(null);
+            }
+          }
+          setDraftLoaded(true);
+        },
+        (error) => {
+          setDraftLoaded(true);
+          handleFirestoreError(error, OperationType.LIST, draftsPath);
+        }
+      );
     });
 
     return () => {
@@ -516,6 +843,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (unsubAccounts) unsubAccounts();
       if (unsubClips) unsubClips();
       if (unsubPrefs) unsubPrefs();
+      if (unsubDrafts) unsubDrafts();
     };
   }, [ensureUserDocument]);
 
@@ -552,7 +880,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const id = sanitizeId(
         `acc_${input.platform}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
       );
-      const currentAccounts = socialAccountsRef.current;
+      const currentAccounts = workspaceAccountsRef.current;
       const existingOnPlatform = currentAccounts.filter((a) => a.platform === input.platform);
       const shouldBeDefault = input.isDefault ?? existingOnPlatform.length === 0;
 
@@ -587,6 +915,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const nowIso = new Date().toISOString();
         const localRecord: SocialAccount = {
           ...basePayload,
+          storageSource: 'local',
           createdAt: nowIso,
           updatedAt: nowIso,
         };
@@ -598,8 +927,8 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
               : acc
           ),
         ];
-        socialAccountsRef.current = nextAccounts;
-        setSocialAccounts(nextAccounts);
+        workspaceAccountsRef.current = nextAccounts;
+        setWorkspaceAccounts(nextAccounts);
         saveLocalJson(LOCAL_ACCOUNTS_KEY, nextAccounts);
 
         if (shouldBeDefault && workspacePrefsRef.current.autoApplyAccounts) {
@@ -715,13 +1044,30 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         cleanPatch.lastSyncedAt = sanitizeText(patch.lastSyncedAt, 64, new Date().toISOString());
       }
 
+      if (existingAcc?.storageSource === 'oauth_session') {
+        const res = await fetch(`/api/social/session-accounts/${encodeURIComponent(accountId)}`, {
+          method: 'PATCH',
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'ClipForge',
+          },
+          body: JSON.stringify(cleanPatch),
+        });
+        const data = await parseJsonResponse(res, 'Could not update OAuth account');
+        if (res.ok && Array.isArray(data.accounts)) {
+          setSessionOAuthAccounts(data.accounts);
+        }
+        return;
+      }
+
       if (!currentUser) {
         const nowIso = new Date().toISOString();
-        const nextAccounts = socialAccountsRef.current.map((acc) =>
+        const nextAccounts = workspaceAccountsRef.current.map((acc) =>
           acc.id === safeId ? { ...acc, ...cleanPatch, updatedAt: nowIso } : acc
         );
-        socialAccountsRef.current = nextAccounts;
-        setSocialAccounts(nextAccounts);
+        workspaceAccountsRef.current = nextAccounts;
+        setWorkspaceAccounts(nextAccounts);
         saveLocalJson(LOCAL_ACCOUNTS_KEY, nextAccounts);
         return;
       }
@@ -743,17 +1089,35 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     async (accountId: string, platform: SocialPlatform) => {
       const currentUser = auth.currentUser;
       const safeId = sanitizeId(accountId);
-      const targetAcc = socialAccountsRef.current.find((a) => a.id === safeId);
+      const targetAcc = socialAccountsRef.current.find(
+        (a) => a.id === accountId || a.id === safeId
+      );
+
+      if (targetAcc?.storageSource === 'oauth_session') {
+        const res = await fetch(
+          `/api/social/session-accounts/${encodeURIComponent(targetAcc.id)}/default`,
+          {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'X-Requested-With': 'ClipForge' },
+          }
+        );
+        const data = await parseJsonResponse(res, 'Could not set default OAuth account');
+        if (res.ok && Array.isArray(data.accounts)) {
+          setSessionOAuthAccounts(data.accounts);
+        }
+        return;
+      }
 
       if (!currentUser) {
         const nowIso = new Date().toISOString();
-        const nextAccounts = socialAccountsRef.current.map((acc) =>
+        const nextAccounts = workspaceAccountsRef.current.map((acc) =>
           acc.platform === platform
             ? { ...acc, isDefault: acc.id === safeId, updatedAt: nowIso }
             : acc
         );
-        socialAccountsRef.current = nextAccounts;
-        setSocialAccounts(nextAccounts);
+        workspaceAccountsRef.current = nextAccounts;
+        setWorkspaceAccounts(nextAccounts);
         saveLocalJson(LOCAL_ACCOUNTS_KEY, nextAccounts);
 
         if (targetAcc && workspacePrefsRef.current.autoApplyAccounts) {
@@ -777,7 +1141,7 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const docPath = `users/${currentUser.uid}/socialAccounts/${safeId}`;
       try {
         const batch = writeBatch(db);
-        socialAccountsRef.current
+        workspaceAccountsRef.current
           .filter((a) => a.platform === platform)
           .forEach((acc) => {
             const nextDefault = acc.id === safeId;
@@ -816,11 +1180,27 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const removeSocialAccount = useCallback(async (accountId: string) => {
     const currentUser = auth.currentUser;
     const safeId = sanitizeId(accountId);
+    const targetAcc = socialAccountsRef.current.find(
+      (a) => a.id === accountId || a.id === safeId
+    );
+
+    if (targetAcc?.storageSource === 'oauth_session') {
+      const res = await fetch(`/api/social/session-accounts/${encodeURIComponent(targetAcc.id)}`, {
+        method: 'DELETE',
+        credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'ClipForge' },
+      });
+      const data = await parseJsonResponse(res, 'Could not disconnect OAuth account');
+      if (res.ok && Array.isArray(data.accounts)) {
+        setSessionOAuthAccounts(data.accounts);
+      }
+      return;
+    }
 
     if (!currentUser) {
-      const nextAccounts = socialAccountsRef.current.filter((a) => a.id !== safeId);
-      socialAccountsRef.current = nextAccounts;
-      setSocialAccounts(nextAccounts);
+      const nextAccounts = workspaceAccountsRef.current.filter((a) => a.id !== safeId);
+      workspaceAccountsRef.current = nextAccounts;
+      setWorkspaceAccounts(nextAccounts);
       saveLocalJson(LOCAL_ACCOUNTS_KEY, nextAccounts);
       return;
     }
@@ -1186,6 +1566,128 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   }, [getDefaultAccountForPlatform]);
 
+  const saveClipDraft = useCallback(
+    async (input: SaveClipDraftInput): Promise<ClipDraft | null> => {
+      const currentUser = auth.currentUser;
+      const sanitizedVideo = sanitizeDraftVideoSummary(input.video);
+      const sanitizedClip = sanitizeDraftClip(input.clip);
+      const sanitizedSettings = sanitizeDraftSettings(input.settings);
+      const sanitizedMode: 'feed' | 'studio' = input.appMode === 'feed' ? 'feed' : 'studio';
+      const sanitizedTime = Math.round(clampNum(input.currentTime, 0, 86400, 0) * 10) / 10;
+
+      if (!currentUser) {
+        const nowIso = new Date().toISOString();
+        const localDraft: ClipDraft = {
+          id: ACTIVE_DRAFT_ID,
+          userId: 'local',
+          appMode: sanitizedMode,
+          currentTime: sanitizedTime,
+          video: sanitizedVideo,
+          clip: sanitizedClip,
+          settings: sanitizedSettings,
+          createdAt: savedDraft?.createdAt || nowIso,
+          updatedAt: nowIso,
+        };
+        setSavedDraft(localDraft);
+        setLastDraftSavedAt(nowIso);
+        saveLocalJson(LOCAL_DRAFT_KEY, localDraft);
+        return localDraft;
+      }
+
+      setIsSavingDraft(true);
+      const docPath = `users/${currentUser.uid}/clipDrafts/${ACTIVE_DRAFT_ID}`;
+      try {
+        if (profileReadyUidRef.current !== currentUser.uid) {
+          await ensureUserDocument(currentUser);
+        }
+        const draftRef = doc(db, 'users', currentUser.uid, 'clipDrafts', ACTIVE_DRAFT_ID);
+        const dynamicFields = {
+          appMode: sanitizedMode,
+          currentTime: sanitizedTime,
+          video: sanitizedVideo,
+          clip: sanitizedClip,
+          settings: sanitizedSettings,
+          updatedAt: serverTimestamp(),
+        };
+
+        if (!hasDraftDocRef.current) {
+          const existingSnap = await getDoc(draftRef);
+          if (existingSnap.exists()) {
+            hasDraftDocRef.current = true;
+            await updateDoc(draftRef, dynamicFields);
+          } else {
+            await setDoc(draftRef, {
+              id: ACTIVE_DRAFT_ID,
+              userId: currentUser.uid,
+              ...dynamicFields,
+              createdAt: serverTimestamp(),
+            });
+            hasDraftDocRef.current = true;
+          }
+        } else {
+          try {
+            await updateDoc(draftRef, dynamicFields);
+          } catch (updateErr: any) {
+            if (String(updateErr?.code || '').includes('not-found')) {
+              await setDoc(draftRef, {
+                id: ACTIVE_DRAFT_ID,
+                userId: currentUser.uid,
+                ...dynamicFields,
+                createdAt: serverTimestamp(),
+              });
+              hasDraftDocRef.current = true;
+            } else {
+              throw updateErr;
+            }
+          }
+        }
+
+        const nowIso = new Date().toISOString();
+        const optimisticDraft: ClipDraft = {
+          id: ACTIVE_DRAFT_ID,
+          userId: currentUser.uid,
+          appMode: sanitizedMode,
+          currentTime: sanitizedTime,
+          video: sanitizedVideo,
+          clip: sanitizedClip,
+          settings: sanitizedSettings,
+          updatedAt: nowIso,
+        };
+        setSavedDraft(optimisticDraft);
+        setLastDraftSavedAt(nowIso);
+        return optimisticDraft;
+      } catch (error) {
+        handleFirestoreError(error, OperationType.WRITE, docPath);
+      } finally {
+        setIsSavingDraft(false);
+      }
+    },
+    [ensureUserDocument, savedDraft?.createdAt]
+  );
+
+  const clearClipDraft = useCallback(async () => {
+    const currentUser = auth.currentUser;
+    setSavedDraft(null);
+    setLastDraftSavedAt(null);
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.removeItem(LOCAL_DRAFT_KEY);
+      } catch {}
+    }
+
+    if (!currentUser) {
+      return;
+    }
+
+    const docPath = `users/${currentUser.uid}/clipDrafts/${ACTIVE_DRAFT_ID}`;
+    try {
+      await deleteDoc(doc(db, 'users', currentUser.uid, 'clipDrafts', ACTIVE_DRAFT_ID));
+      hasDraftDocRef.current = false;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, docPath);
+    }
+  }, []);
+
   return (
     <FirebaseContext.Provider
       value={{
@@ -1199,6 +1701,10 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         publishedClips,
         workspacePrefs,
         workspacePrefsLoaded,
+        savedDraft,
+        draftLoaded,
+        isSavingDraft,
+        lastDraftSavedAt,
         signInWithGoogle,
         signOutUser,
         getDefaultAccountForPlatform,
@@ -1211,6 +1717,9 @@ export const FirebaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         deletePublishedClip,
         updateWorkspacePrefs,
         autoApplyPrimaryAccountsToClips,
+        refreshSessionAccounts,
+        saveClipDraft,
+        clearClipDraft,
       }}
     >
       {children}

@@ -12,6 +12,9 @@ dotenv.config();
 
 const OAUTH_STATE_SECRET =
   process.env.OAUTH_STATE_SECRET || crypto.randomBytes(32).toString("hex");
+const COOKIE_SIGNING_SECRET =
+  process.env.COOKIE_SIGNING_SECRET || OAUTH_STATE_SECRET;
+const SOCIAL_SESSION_COOKIE = "clipforge_social_session";
 
 const execFileAsync = promisify(execFile);
 
@@ -99,6 +102,12 @@ function getGeminiClient() {
   });
 }
 
+function isTimeoutError(err: any): boolean {
+  const status = Number(err?.status || err?.code || err?.statusCode);
+  const msg = String(err?.message || "").toLowerCase();
+  return status === 504 || msg.includes("timeout") || msg.includes("etimedout");
+}
+
 function isTransientGeminiError(err: any): boolean {
   const status = Number(err?.status || err?.code || err?.statusCode);
   const msg = String(err?.message || "").toLowerCase();
@@ -117,7 +126,44 @@ function isTransientGeminiError(err: any): boolean {
   );
 }
 
-// Retry helper with fast exponential backoff for transient Gemini errors
+// Safely parse JSON returned by Gemini even if wrapped in markdown fences or citations
+function parseGeminiJson<T = any>(rawText: string | undefined, fallback: T = {} as T): T {
+  const trimmed = String(rawText || "").trim();
+  if (!trimmed) return fallback;
+  const unfenced = trimmed
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+  try {
+    return JSON.parse(unfenced) as T;
+  } catch {
+    // Strip markdown code block anywhere in text first
+    const fenceMatch = unfenced.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenceMatch?.[1]) {
+      try {
+        return JSON.parse(fenceMatch[1].trim()) as T;
+      } catch {}
+    }
+    // Extract first balanced {...} JSON object cleanly (avoids citation brackets like [1])
+    const firstBrace = unfenced.indexOf("{");
+    const lastBrace = unfenced.lastIndexOf("}");
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      try {
+        return JSON.parse(unfenced.slice(firstBrace, lastBrace + 1)) as T;
+      } catch {}
+    }
+    const firstBracket = unfenced.indexOf("[");
+    const lastBracket = unfenced.lastIndexOf("]");
+    if (firstBracket !== -1 && lastBracket > firstBracket) {
+      try {
+        return JSON.parse(unfenced.slice(firstBracket, lastBracket + 1)) as T;
+      } catch {}
+    }
+    throw new Error("Gemini returned malformed JSON.");
+  }
+}
+
+// Retry helper with fast backoff ONLY for non-timeout transient glitches
 async function withGeminiRetry<T>(
   operation: () => Promise<T>,
   maxAttempts = 2
@@ -128,18 +174,20 @@ async function withGeminiRetry<T>(
       return await operation();
     } catch (err: any) {
       lastError = err;
-      if (!isTransientGeminiError(err) || attempt === maxAttempts) {
+      // Never retry a timeout (504) or 503 on the exact same model; fail over immediately instead
+      const status = Number(err?.status || err?.code || err?.statusCode);
+      if (isTimeoutError(err) || status === 503 || !isTransientGeminiError(err) || attempt === maxAttempts) {
         throw err;
       }
-      const delayMs = 600 * attempt + Math.round(Math.random() * 300);
-      console.warn(`Gemini transient error (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms:`, err?.message);
+      const delayMs = 350 * attempt;
+      console.warn(`Gemini transient glitch (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms:`, err?.message);
       await new Promise((r) => setTimeout(r, delayMs));
     }
   }
   throw lastError;
 }
 
-function withGeminiTimeout<T>(promise: Promise<T>, ms = 18000, label = "Gemini API"): Promise<T> {
+function withGeminiTimeout<T>(promise: Promise<T>, ms = 12000, label = "Gemini API"): Promise<T> {
   return Promise.race([
     promise,
     new Promise<T>((_, reject) =>
@@ -152,7 +200,8 @@ function withGeminiTimeout<T>(promise: Promise<T>, ms = 18000, label = "Gemini A
   ]);
 }
 
-// Primary generation helper with automatic fallback from gemini-4-hydrogen -> gemini-3.1-flash-lite on transient 503/429/timeout
+// Primary generation helper with instant failover from stalled/busy primary model -> gemini-3.1-flash-lite
+// Keeps worst-case total latency comfortably under ~24s so reverse-proxy gateways never 504.
 async function generateContentResilient(
   ai: GoogleGenAI,
   params: {
@@ -163,7 +212,9 @@ async function generateContentResilient(
   }
 ) {
   const primaryModel = params.model || "gemini-4-hydrogen";
-  const timeoutMs = params.timeoutMs || 18000;
+  const primaryTimeoutMs = Math.min(params.timeoutMs || 11000, 14000);
+  const fallbackTimeoutMs = Math.min(Math.max(params.timeoutMs || 12000, 12000), 15000);
+  const t0 = Date.now();
   try {
     return await withGeminiRetry(
       () =>
@@ -173,14 +224,16 @@ async function generateContentResilient(
             contents: params.contents,
             config: params.config,
           }),
-          timeoutMs,
+          primaryTimeoutMs,
           primaryModel
         ),
-      2
+      1
     );
   } catch (err: any) {
     if (isTransientGeminiError(err) && primaryModel !== "gemini-3.1-flash-lite") {
-      console.warn(`Primary model ${primaryModel} busy (${err?.status || err?.message}), falling back to gemini-3.1-flash-lite`);
+      console.warn(
+        `Primary model ${primaryModel} failed over in ${Date.now() - t0}ms (${err?.status || err?.message}); using gemini-3.1-flash-lite`
+      );
       const fallbackConfig = params.config ? { ...params.config } : undefined;
       if (fallbackConfig && "thinkingConfig" in fallbackConfig) {
         delete fallbackConfig.thinkingConfig;
@@ -193,7 +246,7 @@ async function generateContentResilient(
               contents: params.contents,
               config: fallbackConfig,
             }),
-            timeoutMs,
+            fallbackTimeoutMs,
             "gemini-3.1-flash-lite"
           ),
         2
@@ -296,14 +349,16 @@ function resolveLocalVideoPath(videoUrl?: string): string | null {
   if (videoUrl.startsWith("http://") || videoUrl.startsWith("https://") || videoUrl.startsWith("blob:")) {
     return null;
   }
-  const cleanRel = videoUrl.replace(/^\/+/, "");
+  const cleanUrl = videoUrl.split("?")[0].split("#")[0];
+  const cleanRel = cleanUrl.replace(/^\/+/, "");
+  if (!cleanRel) return null;
   const candidates = [
     path.resolve(publicDir, cleanRel.replace(/^public\//, "")),
     path.resolve(process.cwd(), cleanRel),
   ];
   for (const candidate of candidates) {
     if (
-      (candidate.startsWith(publicDir) || candidate.startsWith("/tmp")) &&
+      (candidate.startsWith(publicDir + path.sep) || candidate.startsWith("/tmp" + path.sep)) &&
       fs.existsSync(candidate) &&
       fs.statSync(candidate).size > 1000
     ) {
@@ -316,7 +371,7 @@ function resolveLocalVideoPath(videoUrl?: string): string | null {
 // Extract YouTube video ID from URL
 function extractYoutubeId(url: string): string {
   const regExp =
-    /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|shorts\/|watch\?v=|&v=)([^#&?]*).*/;
+    /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|shorts\/|live\/|watch\?v=|&v=)([^#&?]*).*/;
   const match = url.match(regExp);
   if (match && match[2] && match[2].length === 11) {
     return match[2];
@@ -489,6 +544,8 @@ app.post("/api/youtube-info", async (req, res) => {
         [
           "--js-runtimes",
           "node",
+          "--socket-timeout",
+          "4",
           "--no-check-certificates",
           "--no-playlist",
           "--dump-json",
@@ -503,7 +560,7 @@ app.post("/api/youtube-info", async (req, res) => {
           "--skip-download",
           url,
         ],
-        { timeout: 12000, maxBuffer: 15 * 1024 * 1024 }
+        { timeout: 5500, maxBuffer: 15 * 1024 * 1024 }
       ),
       fetch(
         `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`,
@@ -573,14 +630,22 @@ app.post("/api/youtube-info", async (req, res) => {
     if (html) {
       if (!duration) {
         const durMatch = html.match(/"lengthSeconds":"(\d+)"/);
-        if (durMatch?.[1]) duration = Number(durMatch[1]);
+        const approxMatch = html.match(/"approxDurationMs":"(\d+)"/);
+        if (durMatch?.[1]) {
+          duration = Number(durMatch[1]);
+        } else if (approxMatch?.[1]) {
+          duration = Math.round(Number(approxMatch[1]) / 1000);
+        }
       }
       if (!resolvedDesc) {
         const descMatch = html.match(/"shortDescription":"((?:[^"\\]|\\.)*)"/);
+        const metaDescMatch = html.match(/<meta[^>]+(?:name="description"|property="og:description")[^>]+content="([^"]*)"/i);
         if (descMatch?.[1]) {
           try {
             resolvedDesc = JSON.parse(`"${descMatch[1]}"`).slice(0, 1500);
           } catch {}
+        } else if (metaDescMatch?.[1]) {
+          resolvedDesc = metaDescMatch[1].slice(0, 1500);
         }
       }
       if (!transcript) {
@@ -604,33 +669,14 @@ app.post("/api/youtube-info", async (req, res) => {
       }
     }
 
-    // Grounded Gemini URL + Search enrichment when YouTube blocks raw HTML/transcript scraping on datacenter IPs
-    if ((!duration || !transcript) && process.env.GEMINI_API_KEY) {
-      try {
-        const ai = getGeminiClient();
-        const searchPrompt = `Look up this real YouTube video: ${url}
-Known title: "${resolvedTitle || "Unknown"}"
-Known creator: "${resolvedChannel || "Unknown"}"
-Return ONLY a raw JSON object (no markdown fences) with these keys:
-{
-  "durationSeconds": <integer exact or accurate estimated duration in seconds, e.g. 19 or 620>,
-  "summary": "<concise description of what happens / is discussed in this video>",
-  "highlightsContext": "<timestamped outline e.g. [00:00] intro ... [00:45] key point ...>"
-}`;
-        const gRes = await generateContentResilient(ai, {
-          contents: searchPrompt,
-          timeoutMs: 12000,
-          config: {
-            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-            tools: [{ googleSearch: {} }],
-          },
-        });
-        const rawText = (gRes.text || "").trim();
-        const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-        if (jsonMatch?.[0]) {
-          const gData = JSON.parse(jsonMatch[0]);
-          if (!duration && Number(gData.durationSeconds) >= 8) {
-            duration = Math.round(Number(gData.durationSeconds));
+    // Grounded Gemini Search enrichment when YouTube blocks raw HTML/transcript scraping on datacenter IPs
+    if ((!duration || !transcript || !resolvedDesc) && process.env.GEMINI_API_KEY) {
+      const ai = getGeminiClient();
+      const applyGeminiMeta = (gData: any, rawFallbackText: string) => {
+        if (gData && typeof gData === "object") {
+          const parsedDur = Number(gData.durationSeconds);
+          if (!duration && Number.isFinite(parsedDur) && parsedDur >= 8) {
+            duration = Math.round(parsedDur);
           }
           if (!resolvedDesc && gData.summary) {
             resolvedDesc = String(gData.summary).slice(0, 1500);
@@ -638,17 +684,77 @@ Return ONLY a raw JSON object (no markdown fences) with these keys:
           if (!transcript && gData.highlightsContext) {
             transcript = String(gData.highlightsContext).slice(0, 6000);
           }
+        } else if (rawFallbackText.length > 20) {
+          if (!resolvedDesc) resolvedDesc = rawFallbackText.slice(0, 600);
+          if (!transcript) transcript = rawFallbackText.slice(0, 4000);
         }
+      };
+
+      const searchPrompt = `Look up this real YouTube video: ${url}
+Known title: "${resolvedTitle || "Unknown"}"
+Known creator: "${resolvedChannel || "Unknown"}"
+Return ONLY raw JSON (no markdown fences) with keys:
+{
+  "durationSeconds": <integer duration in seconds, e.g. 240 or 1541>,
+  "summary": "<concise 2-sentence summary of what happens in this video>",
+  "highlightsContext": "<timestamped breakdown of key moments e.g. [00:00] intro ... [01:30] climax ...>"
+}`;
+
+      let gotSearchMeta = false;
+      try {
+        const gRes = await generateContentResilient(ai, {
+          contents: searchPrompt,
+          timeoutMs: 9000,
+          config: {
+            tools: [{ googleSearch: {} }],
+          },
+        });
+        const gText = String(gRes.text || "").trim();
+        let gData: any = null;
+        try {
+          gData = parseGeminiJson<any>(gText, null);
+        } catch {
+          gData = null;
+        }
+        applyGeminiMeta(gData, gText);
+        gotSearchMeta = Boolean(duration && (resolvedDesc || transcript));
       } catch (groundErr: any) {
         console.warn("Gemini grounded YouTube metadata notice:", groundErr?.message);
+      }
+
+      // Structured fallback if googleSearch tool is unavailable or returned empty
+      if (!gotSearchMeta) {
+        try {
+          const fallbackRes = await generateContentResilient(ai, {
+            contents: `Analyze this YouTube video from its title, creator, and URL:\nURL: ${url}\nTitle: "${resolvedTitle || "YouTube Video"}"\nCreator: "${resolvedChannel || "Creator"}"\nEstimate realistic durationSeconds if known, summarize the video clearly, and provide a structured timestamped highlightsContext outline so clips can be planned accurately.`,
+            timeoutMs: 8000,
+            config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  durationSeconds: { type: Type.INTEGER },
+                  summary: { type: Type.STRING },
+                  highlightsContext: { type: Type.STRING },
+                },
+                required: ["durationSeconds", "summary", "highlightsContext"],
+              },
+            },
+          });
+          const fData = parseGeminiJson<any>(fallbackRes.text, null);
+          applyGeminiMeta(fData, String(fallbackRes.text || ""));
+        } catch (fallbackErr: any) {
+          console.warn("Gemini YouTube structured fallback notice:", fallbackErr?.message);
+        }
       }
     }
 
     duration = Math.max(10, duration || 180);
 
-    // Cache full MP4 only when yt-dlp metadata succeeded, not bot-blocked, and duration <= 15 minutes
+    // Cache full MP4 only when yt-dlp metadata succeeded, not bot-blocked, and duration <= 10 minutes
     let playableSourceUrl: string | null = null;
-    if (videoId && ytDlpSettled.status === "fulfilled" && !ytdlpBotBlocked && duration <= 900) {
+    if (videoId && ytDlpSettled.status === "fulfilled" && !ytdlpBotBlocked && duration <= 600) {
       playableSourceUrl = await ensureYoutubeCached(url, resolvedId);
     }
 
@@ -712,6 +818,10 @@ app.post("/api/ingest-url", async (req, res) => {
       if (!dlRes.ok) {
         return res.status(400).json({ error: `Could not download video URL (HTTP ${dlRes.status}).` });
       }
+      const contentLen = Number(dlRes.headers.get("content-length") || 0);
+      if (contentLen > 250 * 1024 * 1024) {
+        return res.status(413).json({ error: "Remote video exceeds the 250MB URL ingestion limit." });
+      }
       const arrayBuf = await dlRes.arrayBuffer();
       const buf = Buffer.from(arrayBuf);
       if (buf.length < 5000) {
@@ -734,41 +844,42 @@ app.post("/api/ingest-url", async (req, res) => {
       });
     }
 
-    // 2. Otherwise use yt-dlp to extract & download from Vimeo, TikTok, Instagram, X, Twitch, Reddit, etc.
+    // 2. Otherwise use yt-dlp in a single pass (--write-info-json) to extract metadata + download MP4
+    const infoJsonPath = `${outPath}.info.json`;
     let info: any = null;
     try {
-      const { stdout } = await execFileAsync(
+      await execFileAsync(
         ensureYtdlpReady(),
         [
+          "--js-runtimes",
+          "node",
+          "--socket-timeout",
+          "8",
           "--no-check-certificates",
           "--no-playlist",
-          "--dump-json",
-          "--skip-download",
+          "--write-info-json",
+          "--merge-output-format",
+          "mp4",
+          "-f",
+          "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best[ext=mp4]/best",
+          "--max-filesize",
+          "250M",
+          "-o",
+          outPath,
           cleanUrl,
         ],
-        { timeout: 15000, maxBuffer: 15 * 1024 * 1024 }
+        { timeout: 30000, maxBuffer: 12 * 1024 * 1024 }
       );
-      const lastLine = stdout.trim().split("\n").reverse().find((l) => l.trim().startsWith("{"));
-      if (lastLine) info = JSON.parse(lastLine);
-    } catch (infoErr: any) {
-      console.warn("Generic URL dump-json notice:", infoErr?.message);
+      if (fs.existsSync(infoJsonPath)) {
+        try {
+          info = JSON.parse(fs.readFileSync(infoJsonPath, "utf-8"));
+        } catch {}
+      }
+    } finally {
+      if (fs.existsSync(infoJsonPath)) {
+        fs.unlink(infoJsonPath, () => {});
+      }
     }
-
-    await execFileAsync(
-      ensureYtdlpReady(),
-      [
-        "--no-check-certificates",
-        "--no-playlist",
-        "-f",
-        "best[height<=1080][ext=mp4]/best[ext=mp4]/best",
-        "--max-filesize",
-        "250M",
-        "-o",
-        outPath,
-        cleanUrl,
-      ],
-      { timeout: 40000, maxBuffer: 10 * 1024 * 1024 }
-    );
 
     if (!fs.existsSync(outPath) || fs.statSync(outPath).size < 5000) {
       return res.status(400).json({ error: "Could not download playable video from that URL." });
@@ -840,6 +951,7 @@ async function analyzeVideoKeyframes(localFile: string, duration: number): Promi
     const ai = getGeminiClient();
     const res = await generateContentResilient(ai, {
       contents: { parts },
+      timeoutMs: 9000,
       config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
     });
     return (res.text || "").trim().slice(0, 4000);
@@ -893,7 +1005,11 @@ app.post("/api/transcribe-video", async (req, res) => {
     }
 
     const meta = await probeVideoFile(localFile);
-    const visualPromise = analyzeVideoKeyframes(localFile, meta.duration);
+    const visualPromise = withGeminiTimeout(
+      analyzeVideoKeyframes(localFile, meta.duration),
+      18000,
+      "Keyframe analysis"
+    ).catch(() => "");
 
     let transcriptText = "";
     let noAudio = !meta.hasAudio;
@@ -901,101 +1017,105 @@ app.post("/api/transcribe-video", async (req, res) => {
     if (meta.hasAudio && !skipAudio) {
       const ai = getGeminiClient();
 
-      // Split longer videos into 600s chunks (up to 30 minutes = 3 chunks)
-      const chunkLen = 600;
-      const numChunks = Math.min(3, Math.max(1, Math.ceil(meta.duration / chunkLen)));
-      const chunkTranscripts: string[] = [];
+      // Split longer videos into up to 2 parallel chunks (up to ~30 min coverage)
+      const chunkLen = meta.duration > 1200 ? 900 : 600;
+      const numChunks = Math.min(2, Math.max(1, Math.ceil(meta.duration / chunkLen)));
 
-      for (let i = 0; i < numChunks; i++) {
-        const startOffset = i * chunkLen;
-        const tempMp3 = `/tmp/audio_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}.mp3`;
-        tempFiles.push(tempMp3);
+      const chunkTranscripts = await Promise.all(
+        Array.from({ length: numChunks }, async (_, i) => {
+          const startOffset = i * chunkLen;
+          const tempMp3 = `/tmp/audio_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}.mp3`;
+          tempFiles.push(tempMp3);
 
-        await execFileAsync(
-          "ffmpeg",
-          [
-            "-y",
-            "-ss",
-            String(startOffset),
-            "-i",
-            localFile,
-            "-t",
-            String(chunkLen),
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-b:a",
-            "20k",
-            "-f",
-            "mp3",
-            tempMp3,
-          ],
-          { timeout: 30000 }
-        );
-
-        if (!fs.existsSync(tempMp3) || fs.statSync(tempMp3).size < 200) {
-          continue;
-        }
-
-        const audioBase64 = fs.readFileSync(tempMp3).toString("base64");
-        const offsetNote =
-          startOffset > 0
-            ? ` Note: This audio chunk starts at ${Math.floor(startOffset / 60)}m${startOffset % 60}s into the full video; adjust all [MM:SS] timestamps by adding ${startOffset} seconds.`
-            : "";
-
-        const audioContents = {
-          parts: [
-            {
-              inlineData: {
-                mimeType: "audio/mp3",
-                data: audioBase64,
-              },
-            },
-            {
-              text: `Transcribe every spoken sentence accurately. Format each line strictly with its timestamp prefix like [MM:SS] Speaker: spoken text. Do not skip comedic pauses, reactions, or key insights.${offsetNote}`,
-            },
-          ],
-        };
-
-        let response;
-        try {
-          response = await withGeminiRetry(
-            () =>
-              withGeminiTimeout(
-                ai.models.generateContent({
-                  model: "gemini-3.5-transcribe",
-                  contents: audioContents,
-                }),
-                25000,
-                "gemini-3.5-transcribe"
-              ),
-            2
+          await execFileAsync(
+            "ffmpeg",
+            [
+              "-y",
+              "-ss",
+              String(startOffset),
+              "-i",
+              localFile!,
+              "-t",
+              String(chunkLen),
+              "-vn",
+              "-ac",
+              "1",
+              "-ar",
+              "16000",
+              "-b:a",
+              "16k",
+              "-f",
+              "mp3",
+              tempMp3,
+            ],
+            { timeout: 20000 }
           );
-        } catch (trErr: any) {
-          const msg = String(trErr?.message || "");
-          if (
-            Number(trErr?.status) === 404 ||
-            msg.includes("404") ||
-            msg.includes("NOT_FOUND") ||
-            isTransientGeminiError(trErr)
-          ) {
-            response = await generateContentResilient(ai, {
-              contents: audioContents,
-              timeoutMs: 25000,
-              config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
-            });
-          } else {
-            throw trErr;
+
+          if (!fs.existsSync(tempMp3) || fs.statSync(tempMp3).size < 200) {
+            return "";
           }
-        }
 
-        const chunkOut = (response.text || "").trim();
-        if (chunkOut) chunkTranscripts.push(chunkOut);
-      }
+          const audioBase64 = fs.readFileSync(tempMp3).toString("base64");
+          const offsetNote =
+            startOffset > 0
+              ? ` Note: This audio chunk starts at ${Math.floor(startOffset / 60)}m${startOffset % 60}s into the full video; adjust all [MM:SS] timestamps by adding ${startOffset} seconds.`
+              : "";
 
-      transcriptText = chunkTranscripts.join("\n").trim();
+          const audioContents = {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: "audio/mp3",
+                  data: audioBase64,
+                },
+              },
+              {
+                text: `Transcribe every spoken sentence accurately. Format each line strictly with its timestamp prefix like [MM:SS] Speaker: spoken text. Do not skip comedic pauses, reactions, or key insights.${offsetNote}`,
+              },
+            ],
+          };
+
+          let response;
+          try {
+            response = await withGeminiTimeout(
+              ai.models.generateContent({
+                model: "gemini-3.5-transcribe",
+                contents: audioContents,
+              }),
+              13000,
+              "gemini-3.5-transcribe"
+            );
+          } catch (trErr: any) {
+            const msg = String(trErr?.message || "");
+            if (
+              Number(trErr?.status) === 404 ||
+              msg.includes("404") ||
+              msg.includes("NOT_FOUND") ||
+              isTransientGeminiError(trErr)
+            ) {
+              console.warn(`Audio transcription failover (${trErr?.status || trErr?.message}); using gemini-3.1-flash-lite`);
+              response = await withGeminiRetry(
+                () =>
+                  withGeminiTimeout(
+                    ai.models.generateContent({
+                      model: "gemini-3.1-flash-lite",
+                      contents: audioContents,
+                    }),
+                    14000,
+                    "gemini-3.1-flash-lite"
+                  ),
+                2
+              );
+            } else {
+              throw trErr;
+            }
+          }
+
+          return (response.text || "").trim();
+        })
+      );
+
+      transcriptText = chunkTranscripts.filter(Boolean).join("\n").trim();
       if (transcriptText.length === 0) noAudio = true;
     }
 
@@ -1120,7 +1240,7 @@ Extract ${desiredClipCount} clips and return strictly valid JSON matching the sc
 
     const response = await generateContentResilient(ai, {
       contents: userPrompt,
-      timeoutMs: 25000,
+      timeoutMs: 13000,
       config: {
         systemInstruction: systemPrompt,
         thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
@@ -1203,7 +1323,7 @@ Extract ${desiredClipCount} clips and return strictly valid JSON matching the sc
       },
     });
 
-    const parsed = JSON.parse((response.text || "{}").trim());
+    const parsed = parseGeminiJson<any>(response.text, {});
     const rawClips = Array.isArray(parsed.clips) ? parsed.clips : [];
     if (rawClips.length === 0) {
       return res.status(502).json({
@@ -1351,7 +1471,7 @@ app.post("/api/ai-reframe", async (req, res) => {
       },
     });
 
-    const parsed = JSON.parse((response.text || "{}").trim());
+    const parsed = parseGeminiJson<any>(response.text, {});
     const allowedFraming = new Set(["smart_crop", "split_screen", "blur_fit", "clean_box"]);
     return res.json({
       panX: Math.max(-100, Math.min(100, Math.round(Number(parsed.panX) || 0))),
@@ -1411,7 +1531,7 @@ Break into natural 3-5 word animated subtitle chunks. Calculate exact relative t
       },
     });
 
-    const parsed = JSON.parse((response.text || "{}").trim());
+    const parsed = parseGeminiJson<any>(response.text, {});
     const normalizedCaptions = (Array.isArray(parsed.captions) ? parsed.captions : []).map((cap: any, i: number) => {
       const s = Math.max(0, Number(cap.start) || i * 2.5);
       const e = Math.max(s + 0.5, Number(cap.end) || s + 2.5);
@@ -1484,7 +1604,7 @@ Provide 5 distinct psychological angles:
       },
     });
 
-    const parsed = JSON.parse((response.text || "{}").trim());
+    const parsed = parseGeminiJson<any>(response.text, {});
     return res.json(parsed);
   } catch (error: any) {
     console.error("Error suggesting hooks:", error);
@@ -1526,7 +1646,7 @@ Return tailored titles, captions, pinned comment prompts, thumbnail cover text, 
       },
     });
 
-    const parsed = JSON.parse((response.text || "{}").trim());
+    const parsed = parseGeminiJson<any>(response.text, {});
     return res.json(parsed);
   } catch (error: any) {
     console.error("Error generating social pack:", error);
@@ -1604,7 +1724,7 @@ Give a concise 1-sentence colorist rationale.`,
       },
     });
 
-    const parsed = JSON.parse((response.text || "{}").trim());
+    const parsed = parseGeminiJson<any>(response.text, {});
     const allowedPresets = new Set([
       "none",
       "grayscale",
@@ -1683,7 +1803,7 @@ ${JSON.stringify(
       },
     });
 
-    const parsed = JSON.parse((response.text || "{}").trim());
+    const parsed = parseGeminiJson<any>(response.text, {});
     const outCaptions = (Array.isArray(parsed.captions) ? parsed.captions : []).map((cap: any, i: number) => {
       const orig = captions[i] || cap;
       const start = Number(orig.start ?? cap.start) || 0;
@@ -1821,10 +1941,7 @@ If the user asks to clip new moments from the video, set triggerClipMorePrompt t
           responseSchema: directorSchema,
         },
       });
-      response = await withGeminiRetry(
-        () => withGeminiTimeout(chat.sendMessage({ message: latestMsg }), 18000, "gemini-4-hydrogen"),
-        2
-      );
+      response = await withGeminiTimeout(chat.sendMessage({ message: latestMsg }), 11000, "gemini-4-hydrogen");
     } catch (dirErr: any) {
       if (isTransientGeminiError(dirErr)) {
         const fallbackChat = ai.chats.create({
@@ -1837,14 +1954,14 @@ If the user asks to clip new moments from the video, set triggerClipMorePrompt t
           },
         });
         response = await withGeminiRetry(
-          () => withGeminiTimeout(fallbackChat.sendMessage({ message: latestMsg }), 18000, "gemini-3.1-flash-lite"),
+          () => withGeminiTimeout(fallbackChat.sendMessage({ message: latestMsg }), 14000, "gemini-3.1-flash-lite"),
           2
         );
       } else {
         throw dirErr;
       }
     }
-    const parsed = JSON.parse((response.text || "{}").trim());
+    const parsed = parseGeminiJson<any>(response.text, {});
 
     return res.json({
       reply: String(parsed.reply || "Updated your Studio settings."),
@@ -1944,10 +2061,10 @@ function buildAssSubtitlesFile(options: {
   const shadowVal = captionDropShadow ? 2 : 0;
   const assFont =
     captionFontFamily === "Rubik Mono One"
-      ? "Impact"
+      ? "Liberation Sans"
       : captionFontFamily === "Plus Jakarta Sans"
-      ? "DejaVu Sans"
-      : "Arial Black";
+      ? "Noto Sans"
+      : "DejaVu Sans";
 
   const header = `[Script Info]
 ScriptType: v4.00+
@@ -2068,14 +2185,14 @@ function buildVerticalFilter(
 
   if (framingMode === "blur_fit") {
     return {
-      filter: `[0:v]split=2[bg][fg];[bg]scale=${outW}:${outH}:force_original_aspect_ratio=increase,crop=${outW}:${outH},boxblur=20:5,eq=brightness=-0.12[bgb];[fg]scale=${outW}:-2:force_original_aspect_ratio=decrease[fgb];[bgb][fgb]overlay=(W-w)/2:(H-h)/2,setsar=1`,
+      filter: `[0:v]split=2[bg][fg];[bg]scale=180:320:force_original_aspect_ratio=increase,crop=180:320,boxblur=6:2,scale=${outW}:${outH},eq=brightness=-0.12[bgb];[fg]scale=${outW}:-2:force_original_aspect_ratio=decrease[fgb];[bgb][fgb]overlay=(W-w)/2:(H-h)/2,setsar=1`,
       isComplex: true,
     };
   }
   if (framingMode === "split_screen") {
     const halfH = Math.round(outH / 2);
     return {
-      filter: `[0:v]split=2[topv][botv];[topv]scale=${outW}:${halfH}:force_original_aspect_ratio=increase,crop=${outW}:${halfH}[t];[botv]scale=${outW}:${halfH}:force_original_aspect_ratio=increase,crop=${outW}:${halfH},boxblur=10:2,eq=saturation=1.25[b];[t][b]vstack=inputs=2,setsar=1`,
+      filter: `[0:v]split=2[topv][botv];[topv]scale=${outW}:${halfH}:force_original_aspect_ratio=increase,crop=${outW}:${halfH}[t];[botv]scale=180:160:force_original_aspect_ratio=increase,crop=180:160,boxblur=4:2,scale=${outW}:${halfH},eq=saturation=1.25[b];[t][b]vstack=inputs=2,setsar=1`,
       isComplex: true,
     };
   }
@@ -2098,6 +2215,7 @@ function buildVerticalFilter(
 async function clipVideoSegment(options: {
   videoUrl?: string;
   playableSourceUrl?: string;
+  clipVideoUrl?: string;
   youtubeUrl?: string;
   startTime: number;
   duration: number;
@@ -2129,6 +2247,7 @@ async function clipVideoSegment(options: {
   const {
     videoUrl = "",
     playableSourceUrl = "",
+    clipVideoUrl = "",
     youtubeUrl = "",
     startTime = 0,
     duration = 30,
@@ -2193,9 +2312,10 @@ async function clipVideoSegment(options: {
     };
   }
 
-  // Prefer locally accessible file (uploads, samples, or cached URL file)
+  // Prefer locally accessible full file (uploads, samples, or cached URL file)
   let localInput =
     resolveLocalVideoPath(playableSourceUrl) || resolveLocalVideoPath(videoUrl);
+  let usingPreClipped = false;
 
   const targetYt =
     youtubeUrl ||
@@ -2214,6 +2334,8 @@ async function clipVideoSegment(options: {
   }
 
   let tempYtDownload: string | null = null;
+  const preClippedLocal = resolveLocalVideoPath(clipVideoUrl);
+
   if (!localInput && targetYt) {
     const rawTemp = `/tmp/yt_sec_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.mp4`;
     try {
@@ -2234,17 +2356,33 @@ async function clipVideoSegment(options: {
         ],
         { timeout: 20000, maxBuffer: 10 * 1024 * 1024 }
       );
-    } catch (ytErr: any) {
-      if (isYoutubeBotWallError(ytErr)) {
-        throw new Error("YOUTUBE_BOT_WALL: YouTube restricted raw MP4 download on this server IP.");
+      if (fs.existsSync(rawTemp) && fs.statSync(rawTemp).size >= 1000) {
+        tempYtDownload = rawTemp;
+        localInput = rawTemp;
       }
-      throw ytErr;
+    } catch (ytErr: any) {
+      if (preClippedLocal) {
+        localInput = preClippedLocal;
+        usingPreClipped = true;
+      } else if (isYoutubeBotWallError(ytErr)) {
+        throw new Error("YOUTUBE_BOT_WALL: YouTube restricted raw MP4 download on this server IP.");
+      } else {
+        throw ytErr;
+      }
     }
-    if (!fs.existsSync(rawTemp) || fs.statSync(rawTemp).size < 1000) {
-      throw new Error(`Failed to extract section ${startSec}s-${endSec}s from YouTube source.`);
+    if (!localInput) {
+      if (preClippedLocal) {
+        localInput = preClippedLocal;
+        usingPreClipped = true;
+      } else {
+        throw new Error(`Failed to extract section ${startSec}s-${endSec}s from YouTube source.`);
+      }
     }
-    tempYtDownload = rawTemp;
-    localInput = rawTemp;
+  }
+
+  if (!localInput && preClippedLocal) {
+    localInput = preClippedLocal;
+    usingPreClipped = true;
   }
 
   if (!localInput || !fs.existsSync(localInput)) {
@@ -2254,6 +2392,14 @@ async function clipVideoSegment(options: {
   let tempAssFile: string | null = null;
   try {
     const probe = await probeVideoFile(localInput);
+    const skipSeek = Boolean(tempYtDownload || usingPreClipped);
+    const actualStartSec = skipSeek
+      ? 0
+      : Math.min(startSec, Math.max(0, (probe.duration || 120) - 3));
+    const actualDurSec = skipSeek
+      ? Math.max(2, Math.min(durSec, probe.duration || durSec))
+      : Math.max(2, Math.min(durSec, (probe.duration || durSec + actualStartSec) - actualStartSec));
+
     const { filter: baseFilter, isComplex } = buildVerticalFilter(resolution, framingMode, panX);
     const postVideoSteps: string[] = [];
 
@@ -2303,14 +2449,14 @@ async function clipVideoSegment(options: {
     const finalFilter =
       postVideoSteps.length > 0 ? `${baseFilter},${postVideoSteps.join(",")}` : baseFilter;
 
-    const ffArgs: string[] = ["-y"];
-    if (!tempYtDownload) {
-      ffArgs.push("-ss", String(startSec));
+    const ffArgs: string[] = ["-y", "-threads", "0"];
+    if (!skipSeek) {
+      ffArgs.push("-ss", String(actualStartSec));
     }
-    ffArgs.push("-i", localInput, "-t", String(durSec));
+    ffArgs.push("-i", localInput, "-t", String(actualDurSec));
 
     if (!probe.hasAudio && forceUniformAudio) {
-      const targetOutDur = Math.max(1, durSec / safeSpeed);
+      const targetOutDur = Math.max(1, actualDurSec / safeSpeed);
       ffArgs.push(
         "-f",
         "lavfi",
@@ -2322,9 +2468,11 @@ async function clipVideoSegment(options: {
     }
 
     if (isComplex) {
-      ffArgs.push("-filter_complex", finalFilter);
+      ffArgs.push("-filter_complex", `${finalFilter}[outv]`);
+      ffArgs.push("-map", "[outv]");
     } else {
       ffArgs.push("-vf", finalFilter);
+      ffArgs.push("-map", "0:v:0");
     }
 
     if (forceUniformAudio) {
@@ -2336,11 +2484,14 @@ async function clipVideoSegment(options: {
       "libx264",
       "-preset",
       "ultrafast",
+      "-crf",
+      "23",
       "-pix_fmt",
       "yuv420p"
     );
 
     if (probe.hasAudio) {
+      ffArgs.push("-map", "0:a:0");
       const audioFilters: string[] = [];
       if (normalizeAudio) {
         audioFilters.push("highpass=f=85", "dynaudnorm=f=150:g=15");
@@ -2356,7 +2507,7 @@ async function clipVideoSegment(options: {
       }
       ffArgs.push("-c:a", "aac", "-b:a", "128k");
     } else if (forceUniformAudio) {
-      ffArgs.push("-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-b:a", "128k", "-shortest");
+      ffArgs.push("-map", "1:a:0", "-c:a", "aac", "-b:a", "128k", "-shortest");
     } else {
       ffArgs.push("-an");
     }
@@ -2364,7 +2515,7 @@ async function clipVideoSegment(options: {
     ffArgs.push("-movflags", "+faststart", finalOut);
 
     await execFileAsync("ffmpeg", ffArgs, {
-      timeout: 30000,
+      timeout: 85000,
       maxBuffer: 10 * 1024 * 1024,
     });
 
@@ -2375,7 +2526,7 @@ async function clipVideoSegment(options: {
     return {
       downloadUrl: `/clips/${clipFilename}`,
       filename: clipFilename,
-      duration: Math.max(2, Math.round(durSec / safeSpeed)),
+      duration: Math.max(2, Math.round(actualDurSec / safeSpeed)),
     };
   } finally {
     if (tempYtDownload && fs.existsSync(tempYtDownload)) {
@@ -2414,7 +2565,7 @@ app.post("/api/auto-clip", async (req, res) => {
     }
 
     const clippedResults: any[] = new Array(clips.length);
-    const concurrency = 2;
+    const concurrency = 3;
     const startedAt = Date.now();
     let cursor = 0;
     let botWallHit = false;
@@ -2422,7 +2573,7 @@ app.post("/api/auto-clip", async (req, res) => {
     const worker = async () => {
       while (cursor < clips.length) {
         const idx = cursor++;
-        if (botWallHit || Date.now() - startedAt > 38000) {
+        if (botWallHit || Date.now() - startedAt > 24000) {
           clippedResults[idx] = { ...clips[idx] };
           continue;
         }
@@ -2489,6 +2640,7 @@ app.post("/api/clip-video", async (req, res) => {
     const {
       videoUrl = "",
       playableSourceUrl = "",
+      clipVideoUrl = "",
       youtubeUrl = "",
       startTime = 0,
       duration = 30,
@@ -2520,6 +2672,7 @@ app.post("/api/clip-video", async (req, res) => {
     const result = await clipVideoSegment({
       videoUrl,
       playableSourceUrl,
+      clipVideoUrl,
       youtubeUrl,
       startTime,
       duration,
@@ -2597,46 +2750,62 @@ app.post("/api/merge-clips", async (req, res) => {
     }
 
     const safeRes = resolution === "1080p" ? "1080p" : "720p";
-    const limitedClips = clips.slice(0, 6);
-    const renderedSegments: { filepath: string; duration: number }[] = [];
+    const {
+      showHookBanner = false,
+      hookBannerText = "",
+    } = req.body;
+    const limitedClips = clips.slice(0, 10);
+    const renderedSegments: { filepath: string; duration: number }[] = new Array(limitedClips.length);
+    const mergeBatchTs = Date.now();
+    let mergeCursor = 0;
 
-    for (let i = 0; i < limitedClips.length; i++) {
-      const c = limitedClips[i];
-      const dur = Math.max(3, Math.round((Number(c.endTime) || 15) - (Number(c.startTime) || 0)));
-      const segResult = await clipVideoSegment({
-        videoUrl,
-        playableSourceUrl,
-        youtubeUrl,
-        startTime: Number(c.startTime) || 0,
-        duration: dur,
-        resolution: safeRes,
-        framingMode: c.framingSuggestion || framingMode,
-        panX: typeof c.panX === "number" ? c.panX : panX,
-        title: c.title || `part_${i + 1}`,
-        clipId: `merge_${Date.now()}_${i}`,
-        burnCaptions: Boolean(burnCaptions),
-        captions: Array.isArray(c.captions) ? c.captions : [],
-        captionColor,
-        captionBaseColor,
-        captionPosition,
-        captionFontSize,
-        captionFontFamily,
-        captionTextCase,
-        captionOutlineWidth,
-        captionDropShadow,
-        videoFilter,
-        filterBrightness: Number(filterBrightness ?? 100),
-        filterContrast: Number(filterContrast ?? 100),
-        filterSaturate: Number(filterSaturate ?? 100),
-        playbackSpeed: Number(playbackSpeed ?? 1),
-        normalizeAudio: Boolean(normalizeAudio),
-        forceUniformAudio: true,
-      });
+    const mergeWorker = async () => {
+      while (mergeCursor < limitedClips.length) {
+        const i = mergeCursor++;
+        const c = limitedClips[i];
+        const dur = Math.max(3, Math.round((Number(c.endTime) || 15) - (Number(c.startTime) || 0)));
+        const segResult = await clipVideoSegment({
+          videoUrl,
+          playableSourceUrl,
+          clipVideoUrl: c.clipVideoUrl || "",
+          youtubeUrl,
+          startTime: Number(c.startTime) || 0,
+          duration: dur,
+          resolution: safeRes,
+          framingMode: c.framingSuggestion || framingMode,
+          panX: typeof c.panX === "number" ? c.panX : panX,
+          title: c.title || `part_${i + 1}`,
+          clipId: `merge_${mergeBatchTs}_${i}`,
+          burnCaptions: Boolean(burnCaptions),
+          captions: Array.isArray(c.captions) ? c.captions : [],
+          captionColor,
+          captionBaseColor,
+          captionPosition,
+          captionFontSize,
+          captionFontFamily,
+          captionTextCase,
+          captionOutlineWidth,
+          captionDropShadow,
+          videoFilter,
+          filterBrightness: Number(filterBrightness ?? 100),
+          filterContrast: Number(filterContrast ?? 100),
+          filterSaturate: Number(filterSaturate ?? 100),
+          playbackSpeed: Number(playbackSpeed ?? 1),
+          normalizeAudio: Boolean(normalizeAudio),
+          showHookBanner: Boolean(showHookBanner),
+          hookBannerText: String(c.hook || hookBannerText || ""),
+          forceUniformAudio: true,
+        });
 
-      const localSeg = path.join(clipsDir, segResult.filename);
-      segmentPaths.push(localSeg);
-      renderedSegments.push({ filepath: localSeg, duration: segResult.duration });
-    }
+        const localSeg = path.join(clipsDir, segResult.filename);
+        segmentPaths.push(localSeg);
+        renderedSegments[i] = { filepath: localSeg, duration: segResult.duration };
+      }
+    };
+
+    await Promise.all(
+      Array.from({ length: Math.min(3, limitedClips.length) }, () => mergeWorker())
+    );
 
     const cleanTitle = String(title || "compilation")
       .replace(/[^a-zA-Z0-9]+/g, "_")
@@ -2646,7 +2815,7 @@ app.post("/api/merge-clips", async (req, res) => {
     const outFilename = `clipforge_${platform}_${cleanTitle}_mashup_${Date.now()}.mp4`;
     const outPath = path.join(clipsDir, outFilename);
 
-    const ffArgs: string[] = ["-y"];
+    const ffArgs: string[] = ["-y", "-threads", "0"];
     renderedSegments.forEach((seg) => {
       ffArgs.push("-i", seg.filepath);
     });
@@ -2663,6 +2832,8 @@ app.post("/api/merge-clips", async (req, res) => {
       "libx264",
       "-preset",
       "ultrafast",
+      "-crf",
+      "23",
       "-pix_fmt",
       "yuv420p",
       "-c:a",
@@ -2675,7 +2846,7 @@ app.post("/api/merge-clips", async (req, res) => {
     );
 
     await execFileAsync("ffmpeg", ffArgs, {
-      timeout: 35000,
+      timeout: 95000,
       maxBuffer: 12 * 1024 * 1024,
     });
 
@@ -2811,10 +2982,12 @@ YOUR OPTIMIZATION TASK:
       },
     });
 
-    const parsed = JSON.parse(response.text || "{}");
+    const parsed = parseGeminiJson<any>(response.text, {});
     const maxDur = Math.max(clipEnd, Number(fullDuration) || clipEnd);
-    const nextStart = Math.max(0, Math.min(maxDur - 5, Number(parsed.recommendedStartTime) ?? clipStart));
-    const nextEnd = Math.min(maxDur, Math.max(nextStart + 5, Number(parsed.recommendedEndTime) ?? clipEnd));
+    const recStartRaw = Number(parsed.recommendedStartTime);
+    const recEndRaw = Number(parsed.recommendedEndTime);
+    const nextStart = Math.max(0, Math.min(maxDur - 5, Number.isFinite(recStartRaw) ? recStartRaw : clipStart));
+    const nextEnd = Math.min(maxDur, Math.max(nextStart + 5, Number.isFinite(recEndRaw) ? recEndRaw : clipEnd));
     const targetSpan = Math.max(4, nextEnd - nextStart);
 
     const rawCaps = Array.isArray(parsed.captions) && parsed.captions.length > 0 ? parsed.captions : clip.captions || [];
@@ -2873,8 +3046,116 @@ YOUR OPTIMIZATION TASK:
 
 type SocialPlatformId = "shorts" | "tiktok";
 
+interface SessionSocialAccountRecord {
+  id: string;
+  userId: string;
+  platform: SocialPlatformId;
+  handle: string;
+  displayName: string;
+  profileUrl: string;
+  avatarUrl: string;
+  connectionType: "oauth";
+  storageSource: "oauth_session";
+  isDefault: boolean;
+  followersCount: number;
+  postsCount: number;
+  notes: string;
+  lastSyncedAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 function isSocialPlatform(val: string): val is SocialPlatformId {
   return val === "shorts" || val === "tiktok";
+}
+
+function parseCookieHeader(cookieHeader?: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!cookieHeader) return out;
+  cookieHeader.split(";").forEach((part) => {
+    const eqIdx = part.indexOf("=");
+    if (eqIdx === -1) return;
+    const key = part.slice(0, eqIdx).trim();
+    const val = part.slice(eqIdx + 1).trim();
+    if (key) {
+      try {
+        out[key] = decodeURIComponent(val);
+      } catch {
+        out[key] = val;
+      }
+    }
+  });
+  return out;
+}
+
+function signSessionAccounts(accounts: SessionSocialAccountRecord[]): string {
+  const payload = JSON.stringify({ accounts: accounts.slice(0, 8), v: 1 });
+  const encoded = Buffer.from(payload, "utf-8").toString("base64url");
+  const sig = crypto
+    .createHmac("sha256", COOKIE_SIGNING_SECRET)
+    .update(encoded)
+    .digest("base64url");
+  return `${encoded}.${sig}`;
+}
+
+function readSessionAccountsFromReq(req: express.Request): SessionSocialAccountRecord[] {
+  try {
+    const cookies = parseCookieHeader(req.headers.cookie);
+    const token = cookies[SOCIAL_SESSION_COOKIE];
+    if (!token) return [];
+    const parts = token.split(".");
+    if (parts.length !== 2) return [];
+    const [encoded, sig] = parts;
+    const expectedSig = crypto
+      .createHmac("sha256", COOKIE_SIGNING_SECRET)
+      .update(encoded)
+      .digest("base64url");
+    const sigBuf = Buffer.from(sig);
+    const expBuf = Buffer.from(expectedSig);
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+      return [];
+    }
+    const parsed = JSON.parse(Buffer.from(encoded, "base64url").toString("utf-8"));
+    if (!Array.isArray(parsed?.accounts)) return [];
+    return parsed.accounts.filter(
+      (a: any) => a && isSocialPlatform(String(a.platform || "")) && typeof a.handle === "string"
+    );
+  } catch {
+    return [];
+  }
+}
+
+function writeSessionAccountsCookie(
+  res: express.Response,
+  accounts: SessionSocialAccountRecord[]
+): void {
+  const signed = signSessionAccounts(accounts);
+  const maxAgeSec = 30 * 24 * 60 * 60;
+  res.append(
+    "Set-Cookie",
+    `${SOCIAL_SESSION_COOKIE}=${encodeURIComponent(
+      signed
+    )}; Path=/; Max-Age=${maxAgeSec}; HttpOnly; Secure; SameSite=None; Partitioned`
+  );
+}
+
+function isSameOriginMutationAllowed(req: express.Request): boolean {
+  if (req.headers["x-requested-with"] !== "ClipForge") {
+    return false;
+  }
+  const origin = typeof req.headers.origin === "string" ? req.headers.origin : "";
+  if (origin) {
+    const host = typeof req.headers.host === "string" ? req.headers.host : "";
+    try {
+      const originHost = new URL(origin).host;
+      if (host && originHost !== host) {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 function getAppBaseUrl(): string {
@@ -3165,10 +3446,50 @@ async function handleSocialOAuthCallback(req: express.Request, res: express.Resp
       };
     }
 
+    const nowIso = new Date().toISOString();
+    const existingAccounts = readSessionAccountsFromReq(req);
+    const normalizedHandle = profile.handle.trim().toLowerCase();
+    const existingMatch = existingAccounts.find(
+      (a) => a.platform === platform && a.handle.trim().toLowerCase() === normalizedHandle
+    );
+    const accountId =
+      existingMatch?.id || `oauth_${platform}_${crypto.randomBytes(6).toString("hex")}`;
+
+    const upsertedAccount: SessionSocialAccountRecord = {
+      id: accountId,
+      userId: "oauth_session",
+      platform,
+      handle: profile.handle,
+      displayName: profile.displayName,
+      profileUrl: profile.profileUrl,
+      avatarUrl: profile.avatarUrl,
+      connectionType: "oauth",
+      storageSource: "oauth_session",
+      isDefault: true,
+      followersCount: Number(profile.followersCount) || 0,
+      postsCount: Number(profile.postsCount) || 0,
+      notes: "Signed in via social OAuth",
+      lastSyncedAt: nowIso,
+      createdAt: existingMatch?.createdAt || nowIso,
+      updatedAt: nowIso,
+    };
+
+    const updatedSessionAccounts: SessionSocialAccountRecord[] = [
+      upsertedAccount,
+      ...existingAccounts
+        .filter((a) => a.id !== accountId)
+        .map((a) =>
+          a.platform === platform ? { ...a, isDefault: false, updatedAt: nowIso } : a
+        ),
+    ];
+
+    writeSessionAccountsCookie(res, updatedSessionAccounts);
+
     return sendPopupResult({
       type: "SOCIAL_OAUTH_SUCCESS",
       platform,
       profile,
+      account: upsertedAccount,
     });
   } catch (err: any) {
     console.error("Social OAuth callback error:", err);
@@ -3187,6 +3508,95 @@ app.get(
   ["/api/social/oauth/:platform/callback", "/api/social/oauth/:platform/callback/"],
   handleSocialOAuthCallback
 );
+
+app.get("/api/social/session-accounts", (req, res) => {
+  const accounts = readSessionAccountsFromReq(req);
+  return res.json({ accounts });
+});
+
+app.post("/api/social/session-accounts/:id/default", (req, res) => {
+  if (!isSameOriginMutationAllowed(req)) {
+    return res.status(403).json({ error: "Forbidden CSRF check" });
+  }
+  const targetId = String(req.params.id || "").trim();
+  const current = readSessionAccountsFromReq(req);
+  const target = current.find((a) => a.id === targetId);
+  if (!target) {
+    return res.status(404).json({ error: "Session account not found" });
+  }
+  const nowIso = new Date().toISOString();
+  const updated = current.map((a) =>
+    a.platform === target.platform
+      ? { ...a, isDefault: a.id === targetId, updatedAt: nowIso }
+      : a
+  );
+  writeSessionAccountsCookie(res, updated);
+  return res.json({ accounts: updated });
+});
+
+app.delete("/api/social/session-accounts/:id", (req, res) => {
+  if (!isSameOriginMutationAllowed(req)) {
+    return res.status(403).json({ error: "Forbidden CSRF check" });
+  }
+  const targetId = String(req.params.id || "").trim();
+  const current = readSessionAccountsFromReq(req);
+  const removed = current.find((a) => a.id === targetId);
+  if (!removed) {
+    return res.json({ accounts: current });
+  }
+  let updated = current.filter((a) => a.id !== targetId);
+  if (removed.isDefault) {
+    let promoted = false;
+    updated = updated.map((a) => {
+      if (!promoted && a.platform === removed.platform) {
+        promoted = true;
+        return { ...a, isDefault: true };
+      }
+      return a;
+    });
+  }
+  writeSessionAccountsCookie(res, updated);
+  return res.json({ accounts: updated });
+});
+
+app.patch("/api/social/session-accounts/:id", (req, res) => {
+  if (!isSameOriginMutationAllowed(req)) {
+    return res.status(403).json({ error: "Forbidden CSRF check" });
+  }
+  const targetId = String(req.params.id || "").trim();
+  const current = readSessionAccountsFromReq(req);
+  const idx = current.findIndex((a) => a.id === targetId);
+  if (idx === -1) {
+    return res.status(404).json({ error: "Session account not found" });
+  }
+  const existing = current[idx];
+  const body = req.body || {};
+  const nowIso = new Date().toISOString();
+  const nextRecord: SessionSocialAccountRecord = {
+    ...existing,
+    displayName:
+      typeof body.displayName === "string" && body.displayName.trim()
+        ? body.displayName.trim().slice(0, 120)
+        : existing.displayName,
+    avatarUrl:
+      typeof body.avatarUrl === "string" ? body.avatarUrl.trim().slice(0, 500) : existing.avatarUrl,
+    followersCount:
+      typeof body.followersCount === "number"
+        ? Math.max(0, Math.round(body.followersCount))
+        : existing.followersCount,
+    postsCount:
+      typeof body.postsCount === "number"
+        ? Math.max(0, Math.round(body.postsCount))
+        : existing.postsCount,
+    notes: typeof body.notes === "string" ? body.notes.trim().slice(0, 300) : existing.notes,
+    lastSyncedAt:
+      typeof body.lastSyncedAt === "string" ? body.lastSyncedAt.slice(0, 64) : nowIso,
+    updatedAt: nowIso,
+  };
+  const updated = current.map((a, i) => (i === idx ? nextRecord : a));
+  writeSessionAccountsCookie(res, updated);
+  return res.json({ accounts: updated });
+});
 
 app.post("/api/social/lookup-channel", async (req, res) => {
   try {

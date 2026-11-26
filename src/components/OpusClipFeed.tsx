@@ -21,6 +21,8 @@ import {
   Highlighter,
   Hash,
   Zap,
+  Layers,
+  Film,
 } from 'lucide-react';
 import {
   ClipHighlight,
@@ -43,7 +45,7 @@ import { parseJsonResponse } from '../utils/safeFetchJson';
 
 function extractYoutubeVideoId(url?: string): string {
   if (!url) return '';
-  const match = url.match(/^.*(youtu.be\/|v\/|u\/\w\/|embed\/|shorts\/|watch\?v=|&v=)([^#&?]*).*/);
+  const match = url.match(/^.*(youtu.be\/|v\/|u\/\w\/|embed\/|shorts\/|live\/|watch\?v=|&v=)([^#&?]*).*/);
   return match && match[2] && match[2].length === 11 ? match[2] : '';
 }
 
@@ -53,7 +55,13 @@ interface OpusClipFeedProps {
   settings: ExportSettings;
   onUpdateSettings: (newSettings: Partial<ExportSettings>) => void;
   onSelectClipToEdit: (clip: ClipHighlight) => void;
-  onOpenExportModal: (clip: ClipHighlight, platform?: ExportPlatform) => void;
+  onOpenExportModal: (
+    clip: ClipHighlight,
+    platform?: ExportPlatform,
+    selectedClipIds?: string[],
+    exportMode?: 'batch' | 'reel',
+    autoStart?: boolean
+  ) => void;
   onNewVideo: () => void;
   onOpenDashboard?: () => void;
   onClipUpdated?: (updatedClip: ClipHighlight) => void;
@@ -103,6 +111,12 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
   const [aiBoostingId, setAiBoostingId] = useState<string | null>(null);
   const [boostNotes, setBoostNotes] = useState<Record<string, string>>({});
   const [videoErrors, setVideoErrors] = useState<Record<string, string>>({});
+  const [feedTrimHud, setFeedTrimHud] = useState<{
+    clipId: string;
+    edge: 'in' | 'out';
+    time: number;
+    nonce: number;
+  } | null>(null);
 
   // Gemini AI Social Pack modal state
   const [socialModalClip, setSocialModalClip] = useState<ClipHighlight | null>(null);
@@ -110,8 +124,110 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
   const [isGeneratingSocial, setIsGeneratingSocial] = useState(false);
   const [socialError, setSocialError] = useState<string | null>(null);
   const [copiedSocialField, setCopiedSocialField] = useState<string | null>(null);
+  const [feedSelectedIds, setFeedSelectedIds] = useState<string[]>([]);
 
   const videoRefMap = useRef<Record<string, HTMLVideoElement | null>>({});
+
+  // Support Ctrl+[ and Ctrl+] directly while previewing a clip in the Feed
+  useEffect(() => {
+    const onFeedKeyDown = (e: KeyboardEvent) => {
+      if (!playingClipId || !onClipUpdated) return;
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+      const isInKey = e.key === '[' || e.code === 'BracketLeft';
+      const isOutKey = e.key === ']' || e.code === 'BracketRight';
+      if (!isInKey && !isOutKey) return;
+
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        ((target.tagName === 'INPUT' && (target as HTMLInputElement).type !== 'range') ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      const clip = highlights.find((h) => h.id === playingClipId);
+      if (!clip) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      const total = Math.max(4, videoSource.duration || 3600);
+      const isPreClipped = Boolean(clip.clipVideoUrl);
+      const rawPlayhead = playheadMap[clip.id] ?? (isPreClipped ? 0 : clip.startTime);
+      const absPlayhead = Math.round(
+        (isPreClipped ? clip.startTime + rawPlayhead : rawPlayhead) * 10
+      ) / 10;
+
+      const hasFullDirectSource = Boolean(
+        videoSource.playableSourceUrl ||
+          (videoSource.videoUrl &&
+            !videoSource.videoUrl.includes('youtube.com') &&
+            !videoSource.videoUrl.includes('youtu.be'))
+      );
+
+      let nextStart = clip.startTime;
+      let nextEnd = clip.endTime;
+
+      if (isInKey) {
+        nextStart = Math.max(0, Math.min(total - 2, absPlayhead));
+        if (nextStart > clip.endTime - 2) {
+          nextEnd = Math.min(total, Math.round((nextStart + 15) * 10) / 10);
+        }
+      } else {
+        nextEnd = Math.max(2, Math.min(total, absPlayhead));
+        if (nextEnd < clip.startTime + 2) {
+          nextStart = Math.max(0, Math.round((nextEnd - 15) * 10) / 10);
+        }
+      }
+
+      const deltaStart = nextStart - clip.startTime;
+      const shiftedCaptions =
+        deltaStart !== 0
+          ? clip.captions.map((c) => ({
+              ...c,
+              start: Math.round((c.start - deltaStart) * 100) / 100,
+              end: Math.round((c.end - deltaStart) * 100) / 100,
+              words: c.words?.map((w) => ({
+                ...w,
+                start: Math.round((w.start - deltaStart) * 100) / 100,
+                end: Math.round((w.end - deltaStart) * 100) / 100,
+              })),
+            }))
+          : clip.captions;
+
+      const updated: ClipHighlight = {
+        ...clip,
+        startTime: nextStart,
+        endTime: nextEnd,
+        captions: shiftedCaptions,
+        ...(hasFullDirectSource ? { clipVideoUrl: undefined, downloadUrl: undefined } : {}),
+      };
+
+      onClipUpdated(updated);
+      const nonce = Date.now();
+      setFeedTrimHud({
+        clipId: clip.id,
+        edge: isInKey ? 'in' : 'out',
+        time: isInKey ? nextStart : nextEnd,
+        nonce,
+      });
+      window.setTimeout(() => {
+        setFeedTrimHud((cur) => (cur?.nonce === nonce ? null : cur));
+      }, 1500);
+    };
+
+    window.addEventListener('keydown', onFeedKeyDown);
+    return () => window.removeEventListener('keydown', onFeedKeyDown);
+  }, [playingClipId, highlights, playheadMap, videoSource, onClipUpdated]);
+
+  // Keep feed selection clean if highlights list changes
+  useEffect(() => {
+    const validIds = new Set(highlights.map((h) => h.id));
+    setFeedSelectedIds((prev) => prev.filter((id) => validIds.has(id)));
+  }, [highlights]);
 
   const filtered = highlights
     .filter((c) => {
@@ -290,6 +406,7 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
       const res = await fetch('/api/clip-video', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(55000),
         body: JSON.stringify({
           videoUrl: videoSource.videoUrl,
           playableSourceUrl: videoSource.playableSourceUrl,
@@ -330,15 +447,22 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
     }
 
     setDownloadingClipId(clip.id);
+    setVideoErrors((prev) => {
+      const copy = { ...prev };
+      delete copy[clip.id];
+      return copy;
+    });
 
     const clipDur = Math.max(5, Math.round(clip.endTime - clip.startTime));
     try {
       const res = await fetch('/api/clip-video', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(100000),
         body: JSON.stringify({
           videoUrl: videoSource.videoUrl,
           playableSourceUrl: videoSource.playableSourceUrl,
+          clipVideoUrl: clip.clipVideoUrl,
           youtubeUrl: videoSource.youtubeUrl,
           startTime: clip.startTime,
           duration: clipDur,
@@ -381,12 +505,17 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
         });
       }
 
-      const clipFileRes = await fetch(data.downloadUrl);
+      const clipFileRes = await fetch(data.downloadUrl, { signal: AbortSignal.timeout(45000) });
+      if (!clipFileRes.ok) {
+        throw new Error(`Could not download rendered MP4 (${clipFileRes.status}).`);
+      }
       const blob = await clipFileRes.blob();
       downloadBlob(blob, data.filename || `clipforge_${clip.id}.mp4`);
-    } catch (err) {
-      console.warn('Direct clip fallback to export modal:', err);
-      onOpenExportModal(clip);
+    } catch (err: any) {
+      setVideoErrors((prev) => ({
+        ...prev,
+        [clip.id]: err?.message || 'Clip export failed. Try opening Export for Studio Render.',
+      }));
     } finally {
       setDownloadingClipId(null);
     }
@@ -394,7 +523,7 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
 
   const handleQuickExportPlatform = async (clip: ClipHighlight, platform: ExportPlatform) => {
     if (!getClipVideoSource(clip) && ytId) {
-      onOpenExportModal(clip, platform);
+      onOpenExportModal(clip);
       return;
     }
 
@@ -403,6 +532,12 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
       : undefined;
 
     setQuickExporting({ clipId: clip.id, platform });
+    setVideoErrors((prev) => {
+      const copy = { ...prev };
+      delete copy[clip.id];
+      return copy;
+    });
+
     try {
       const result = await renderServerClipForPlatform({
         clip,
@@ -443,9 +578,11 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
         accountId: targetAccount?.id,
         accountHandle: targetAccount?.handle,
       }).catch(() => {});
-    } catch (err) {
-      console.warn('Quick platform export fallback to modal:', err);
-      onOpenExportModal(clip, platform);
+    } catch (err: any) {
+      setVideoErrors((prev) => ({
+        ...prev,
+        [clip.id]: err?.message || 'Quick export failed. Open Export modal to retry or use Studio Render.',
+      }));
     } finally {
       setQuickExporting(null);
     }
@@ -607,7 +744,7 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
           )}
         </div>
 
-        <div className="flex items-center gap-2.5 shrink-0">
+        <div className="flex flex-wrap items-center gap-2.5 shrink-0">
           <button
             onClick={() => setSortBy(sortBy === 'score' ? 'timeline' : 'score')}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-950 hover:bg-zinc-800 text-zinc-300 text-xs font-medium border border-zinc-800 transition-colors cursor-pointer"
@@ -616,6 +753,26 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
             <ArrowUpDown className="w-3.5 h-3.5 text-emerald-400" />
             <span>{sortBy === 'score' ? 'Score: High to Low' : 'Order: Timeline'}</span>
           </button>
+
+          {highlights.length > 0 && (
+            <button
+              type="button"
+              onClick={() =>
+                onOpenExportModal(
+                  highlights[0],
+                  'tiktok',
+                  highlights.map((h) => h.id),
+                  'batch',
+                  true
+                )
+              }
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 text-xs font-semibold border border-emerald-500/40 transition-colors cursor-pointer"
+              title="Instantly export & download all clips for TikTok"
+            >
+              <Zap className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Instant Export All ({highlights.length})</span>
+            </button>
+          )}
 
           <button
             onClick={onNewVideo}
@@ -760,38 +917,155 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
         </form>
       )}
 
-      {/* Category Filter Tabs */}
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex flex-wrap items-center gap-1 p-1 rounded-lg bg-zinc-900 border border-zinc-800">
-          {[
-            { id: 'all', label: `All Clips (${highlights.length})` },
-            { id: 'funny', label: `Humor (${highlights.filter((c) => c.category === 'funny').length})` },
-            { id: 'highlight', label: `Climax (${highlights.filter((c) => c.category === 'highlight').length})` },
-            { id: 'educational', label: `Insights (${highlights.filter((c) => c.category === 'educational').length})` },
-            { id: 'debate', label: `Debate (${highlights.filter((c) => c.category === 'debate').length})` },
-          ].map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setSelectedCategory(tab.id)}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer ${
-                selectedCategory === tab.id
-                  ? 'bg-zinc-800 text-white font-semibold'
-                  : 'text-zinc-400 hover:text-zinc-200'
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
+      {/* Category Filter Tabs & Feed Multi-Clip Selection Bar */}
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-1 p-1 rounded-lg bg-zinc-900 border border-zinc-800">
+            {[
+              { id: 'all', label: `All Clips (${highlights.length})` },
+              { id: 'funny', label: `Humor (${highlights.filter((c) => c.category === 'funny').length})` },
+              { id: 'highlight', label: `Climax (${highlights.filter((c) => c.category === 'highlight').length})` },
+              { id: 'educational', label: `Insights (${highlights.filter((c) => c.category === 'educational').length})` },
+              { id: 'debate', label: `Debate (${highlights.filter((c) => c.category === 'debate').length})` },
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setSelectedCategory(tab.id)}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer ${
+                  selectedCategory === tab.id
+                    ? 'bg-zinc-800 text-white font-semibold'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-2.5">
+            {filtered.length > 0 && (
+              <label className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 hover:border-zinc-700 text-xs text-zinc-200 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={
+                    filtered.length > 0 &&
+                    filtered.every((c) => feedSelectedIds.includes(c.id))
+                  }
+                  onChange={() => {
+                    const filteredIds = filtered.map((c) => c.id);
+                    const allFilteredSelected =
+                      filteredIds.length > 0 &&
+                      filteredIds.every((id) => feedSelectedIds.includes(id));
+                    if (allFilteredSelected) {
+                      setFeedSelectedIds((prev) =>
+                        prev.filter((id) => !filteredIds.includes(id))
+                      );
+                    } else {
+                      setFeedSelectedIds((prev) => {
+                        const next = [...prev];
+                        filteredIds.forEach((id) => {
+                          if (!next.includes(id)) next.push(id);
+                        });
+                        return next;
+                      });
+                    }
+                  }}
+                  className="accent-emerald-500 w-3.5 h-3.5 rounded cursor-pointer"
+                />
+                <span>Select All ({filtered.length})</span>
+              </label>
+            )}
+            <span className="text-[11px] text-zinc-500 font-mono hidden sm:inline">
+              Click transcript words to seek
+            </span>
+          </div>
         </div>
 
-        <span className="text-[11px] text-zinc-500 font-mono">
-          Ranked Opus Split View · Click transcript words to seek
-        </span>
+        {feedSelectedIds.length > 0 && (
+          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 rounded-xl bg-emerald-500/10 border border-emerald-500/35">
+            <div className="flex flex-wrap items-center gap-2.5 text-xs">
+              <span className="font-semibold text-emerald-300 tabular-nums">
+                {feedSelectedIds.length} clip{feedSelectedIds.length > 1 ? 's' : ''} selected
+              </span>
+              <span className="text-zinc-500">·</span>
+              <span className="font-mono text-zinc-300 tabular-nums">
+                {highlights
+                  .filter((h) => feedSelectedIds.includes(h.id))
+                  .reduce((sum, h) => sum + Math.max(1, Math.round(h.endTime - h.startTime)), 0)}
+                s total
+              </span>
+              <button
+                type="button"
+                onClick={() => setFeedSelectedIds([])}
+                className="text-[11px] text-zinc-400 hover:text-zinc-200 underline underline-offset-2 cursor-pointer ml-1"
+              >
+                Clear
+              </button>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  const selectedObjs = feedSelectedIds
+                    .map((id) => highlights.find((h) => h.id === id))
+                    .filter((h): h is ClipHighlight => Boolean(h));
+                  const lead = selectedObjs[0] || highlights[0];
+                  if (lead) {
+                    onOpenExportModal(lead, 'tiktok', feedSelectedIds, 'batch', true);
+                  }
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-semibold transition-colors cursor-pointer"
+                title="Immediately start rendering & downloading selected clips"
+              >
+                <Zap className="w-3.5 h-3.5" />
+                <span>Instant Export ({feedSelectedIds.length})</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const selectedObjs = feedSelectedIds
+                    .map((id) => highlights.find((h) => h.id === id))
+                    .filter((h): h is ClipHighlight => Boolean(h));
+                  const lead = selectedObjs[0] || highlights[0];
+                  if (lead) {
+                    onOpenExportModal(lead, undefined, feedSelectedIds, 'batch');
+                  }
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-emerald-300 border border-emerald-500/40 text-xs font-semibold transition-colors cursor-pointer"
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>Batch Options</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const selectedObjs = feedSelectedIds
+                    .map((id) => highlights.find((h) => h.id === id))
+                    .filter((h): h is ClipHighlight => Boolean(h));
+                  const lead = selectedObjs[0] || highlights[0];
+                  if (lead) {
+                    onOpenExportModal(lead, undefined, feedSelectedIds, 'reel');
+                  }
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-xs font-semibold transition-colors cursor-pointer"
+                title="Combine selected clips into a single continuous 9:16 highlight reel"
+              >
+                <Film className="w-3.5 h-3.5" />
+                <span>Highlight Reel ({feedSelectedIds.length})</span>
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* OpusClip Signature Ranked Horizontal Split Rows */}
       <div className="space-y-5">
         {filtered.map((clip, index) => {
+          const isFeedSelected = feedSelectedIds.includes(clip.id);
+          const feedOrderIndex = feedSelectedIds.indexOf(clip.id);
           const duration = Math.max(1, Math.round(clip.endTime - clip.startTime));
           const isPlaying = playingClipId === clip.id;
           const isPreClipped = Boolean(clip.clipVideoUrl);
@@ -829,7 +1103,11 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
           return (
             <article
               key={clip.id}
-              className="rounded-2xl bg-zinc-900/75 border border-zinc-800 hover:border-zinc-700 transition-colors overflow-hidden flex flex-col md:flex-row"
+              className={`rounded-2xl bg-zinc-900/75 border transition-colors overflow-hidden flex flex-col md:flex-row ${
+                isFeedSelected
+                  ? 'border-emerald-500/60 ring-1 ring-emerald-500/20'
+                  : 'border-zinc-800 hover:border-zinc-700'
+              }`}
             >
               {/* LEFT: Clean Uncluttered 9:16 Vertical Player with Live Word-Highlighted Subtitles */}
               <div className="relative w-full md:w-[255px] lg:w-[275px] aspect-[9/16] shrink-0 bg-black border-b md:border-b-0 md:border-r border-zinc-800 overflow-hidden select-none group">
@@ -945,6 +1223,19 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
                 <div className="absolute top-3 right-3 z-20 px-2 py-0.5 rounded bg-black/75 text-[11px] font-mono tabular-nums text-zinc-200 pointer-events-none">
                   {formatSeconds(duration)}
                 </div>
+
+                {feedTrimHud && feedTrimHud.clipId === clip.id && (
+                  <div
+                    key={feedTrimHud.nonce}
+                    className={`absolute top-12 left-1/2 -translate-x-1/2 z-30 px-2.5 py-1 rounded-md border backdrop-blur-md text-[10px] font-mono font-bold tabular-nums whitespace-nowrap pointer-events-none shadow-lg ${
+                      feedTrimHud.edge === 'in'
+                        ? 'bg-emerald-950/90 border-emerald-400/60 text-emerald-200'
+                        : 'bg-violet-950/90 border-violet-400/60 text-violet-200'
+                    }`}
+                  >
+                    {feedTrimHud.edge === 'in' ? 'IN' : 'OUT'} {formatSeconds(feedTrimHud.time)}
+                  </div>
+                )}
 
                 {/* Live Opus Word-Highlighted Subtitle Overlay at Lower Third (Clean, zero face-blocking sticker) */}
                 {activeCaption && (
@@ -1083,6 +1374,27 @@ export const OpusClipFeed: React.FC<OpusClipFeedProps> = ({
                   <div className="flex items-start justify-between gap-4">
                     <div className="space-y-1 min-w-0">
                       <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-400">
+                        <label
+                          onClick={(e) => e.stopPropagation()}
+                          className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-zinc-950 border border-zinc-800 hover:border-emerald-500/50 cursor-pointer select-none"
+                          title="Select clip for batch export or highlight reel"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isFeedSelected}
+                            onChange={() =>
+                              setFeedSelectedIds((prev) =>
+                                prev.includes(clip.id)
+                                  ? prev.filter((id) => id !== clip.id)
+                                  : [...prev, clip.id]
+                              )
+                            }
+                            className="accent-emerald-500 w-3.5 h-3.5 rounded cursor-pointer"
+                          />
+                          <span className="text-[11px] font-medium text-zinc-300">
+                            {isFeedSelected ? `Selected #${feedOrderIndex + 1}` : 'Select'}
+                          </span>
+                        </label>
                         <span className="font-mono font-semibold text-emerald-400 tabular-nums">
                           #{index + 1}
                         </span>

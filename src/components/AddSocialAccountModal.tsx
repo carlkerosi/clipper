@@ -8,7 +8,6 @@ import {
   Copy,
   ExternalLink,
   KeyRound,
-  Link2,
   Search,
   UserPlus,
   Layers,
@@ -48,10 +47,19 @@ export const AddSocialAccountModal: React.FC<AddSocialAccountModalProps> = ({
   editingAccount = null,
   onSaved,
 }) => {
-  const { user, isSigningIn, signInWithGoogle, addSocialAccount, updateSocialAccount } =
-    useFirebase();
+  const {
+    user,
+    isSigningIn,
+    signInWithGoogle,
+    socialAccounts,
+    addSocialAccount,
+    updateSocialAccount,
+    setDefaultSocialAccount,
+    removeSocialAccount,
+    refreshSessionAccounts,
+  } = useFirebase();
 
-  const [mode, setMode] = useState<AddMode>('manual');
+  const [mode, setMode] = useState<AddMode>('oauth');
 
   // Single Manual / OAuth fields
   const [platform, setPlatform] = useState<SocialPlatform>(initialPlatform);
@@ -81,7 +89,7 @@ export const AddSocialAccountModal: React.FC<AddSocialAccountModalProps> = ({
   const [isSaving, setIsSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [oauthSetupInfo, setOauthSetupInfo] = useState<OAuthSetupInfo | null>(null);
-  const [isConnectingOAuth, setIsConnectingOAuth] = useState(false);
+  const [connectingPlatform, setConnectingPlatform] = useState<SocialPlatform | null>(null);
   const [copiedUri, setCopiedUri] = useState(false);
 
   useEffect(() => {
@@ -89,6 +97,7 @@ export const AddSocialAccountModal: React.FC<AddSocialAccountModalProps> = ({
     setErrorMsg(null);
     setLookupNotice(null);
     setOauthSetupInfo(null);
+    setConnectingPlatform(null);
 
     if (editingAccount) {
       setMode('manual');
@@ -104,7 +113,7 @@ export const AddSocialAccountModal: React.FC<AddSocialAccountModalProps> = ({
       setDisplayNameTouched(true);
       setProfileUrlTouched(true);
     } else {
-      setMode('manual');
+      setMode('oauth');
       setPlatform(initialPlatform);
       setHandleInput('');
       setDisplayName('');
@@ -128,7 +137,7 @@ export const AddSocialAccountModal: React.FC<AddSocialAccountModalProps> = ({
     }
   }, [isOpen, initialPlatform, editingAccount]);
 
-  // Listen for 3P OAuth popup completion
+  // Listen for 3P OAuth popup completion — server sets signed HttpOnly cookie directly (not Firebase)
   useEffect(() => {
     if (!isOpen) return;
     const handleMessage = async (event: MessageEvent) => {
@@ -139,37 +148,25 @@ export const AddSocialAccountModal: React.FC<AddSocialAccountModalProps> = ({
       if (event.data?.type === 'SOCIAL_OAUTH_SUCCESS' && event.data?.profile) {
         const oauthPlatform = (event.data.platform as SocialPlatform) || platform;
         const p = event.data.profile;
-        setIsConnectingOAuth(false);
+        setConnectingPlatform(null);
         try {
-          await addSocialAccount({
-            platform: oauthPlatform,
-            handle: p.handle || '@creator',
-            displayName: p.displayName || p.handle || 'Connected Creator',
-            profileUrl: p.profileUrl || '',
-            avatarUrl: p.avatarUrl || '',
-            connectionType: 'oauth',
-            isDefault: true,
-            followersCount: Number(p.followersCount) || 0,
-            postsCount: Number(p.postsCount) || 0,
-            notes: 'Connected via OAuth 2.0',
-            lastSyncedAt: new Date().toISOString(),
-          });
+          await refreshSessionAccounts();
           onSaved?.(
-            `Connected ${PLATFORM_PRESETS[oauthPlatform].label} (${p.handle}) via OAuth.`
+            `Signed into ${PLATFORM_PRESETS[oauthPlatform].label} (${p.handle}) — saved to session.`
           );
           onClose();
         } catch (err: any) {
-          setErrorMsg(err?.message || 'Could not save OAuth-connected account.');
+          setErrorMsg(err?.message || 'Could not load signed-in social account session.');
         }
       } else if (event.data?.type === 'SOCIAL_OAUTH_ERROR') {
-        setIsConnectingOAuth(false);
-        setErrorMsg(event.data?.error || 'OAuth authorization was cancelled or failed.');
+        setConnectingPlatform(null);
+        setErrorMsg(event.data?.error || 'Social sign-in was cancelled or failed.');
       }
     };
 
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
-  }, [isOpen, platform, addSocialAccount, onSaved, onClose]);
+  }, [isOpen, platform, refreshSessionAccounts, onSaved, onClose]);
 
   if (!isOpen) return null;
 
@@ -256,20 +253,21 @@ export const AddSocialAccountModal: React.FC<AddSocialAccountModalProps> = ({
     }
   };
 
-  const handleConnectOAuth = async () => {
-    setIsConnectingOAuth(true);
+  const handleConnectOAuth = async (targetPlatform: SocialPlatform = platform) => {
+    setPlatform(targetPlatform);
+    setConnectingPlatform(targetPlatform);
     setErrorMsg(null);
     setOauthSetupInfo(null);
     try {
-      const res = await fetch(`/api/social/oauth/${platform}/url`);
+      const res = await fetch(`/api/social/oauth/${targetPlatform}/url`);
       const data = await parseJsonResponse(res, 'Failed to prepare OAuth URL');
       if (!res.ok) {
         throw new Error(data.error || 'Failed to prepare OAuth URL');
       }
       if (!data.configured) {
-        setIsConnectingOAuth(false);
+        setConnectingPlatform(null);
         setOauthSetupInfo({
-          platform,
+          platform: targetPlatform,
           redirectUri: data.redirectUri,
           requiredEnvVars: data.requiredEnvVars || [],
           setupGuideUrl: data.setupGuideUrl || '',
@@ -277,14 +275,14 @@ export const AddSocialAccountModal: React.FC<AddSocialAccountModalProps> = ({
         return;
       }
 
-      const popup = window.open(data.url, 'oauth_popup', 'width=600,height=700');
+      const popup = window.open(data.url, `oauth_${targetPlatform}`, 'width=600,height=700');
       if (!popup) {
-        setIsConnectingOAuth(false);
-        setErrorMsg('Popup blocked. Please allow popups or switch to Manual Entry.');
+        setConnectingPlatform(null);
+        setErrorMsg('Popup blocked. Please allow popups in your browser and try again.');
       }
     } catch (err: any) {
-      setIsConnectingOAuth(false);
-      setErrorMsg(err?.message || 'Could not initiate OAuth.');
+      setConnectingPlatform(null);
+      setErrorMsg(err?.message || 'Could not initiate social login.');
     }
   };
 
@@ -402,13 +400,17 @@ export const AddSocialAccountModal: React.FC<AddSocialAccountModalProps> = ({
   const livePreview =
     handleInput.trim() ? parseSocialHandleAndUrl(platform, handleInput, profileUrl) : null;
 
+  const sessionAccounts = socialAccounts.filter((a) => a.storageSource === 'oauth_session');
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
       <div className="w-full max-w-lg rounded-2xl bg-zinc-900 border border-zinc-800 shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800 bg-zinc-950/60">
           <div className="flex items-center gap-2.5 min-w-0">
-            {mode === 'both' ? (
+            {mode === 'oauth' ? (
+              <KeyRound className="w-4 h-4 text-emerald-400 shrink-0" />
+            ) : mode === 'both' ? (
               <Layers className="w-4 h-4 text-emerald-400 shrink-0" />
             ) : (
               platformIcon[platform]
@@ -417,10 +419,10 @@ export const AddSocialAccountModal: React.FC<AddSocialAccountModalProps> = ({
               <h3 className="text-sm font-semibold text-zinc-100 truncate">
                 {editingAccount
                   ? `Edit ${preset.label} Account`
-                  : 'Add Social Media Account'}
+                  : 'Connect Social Accounts'}
               </h3>
               <p className="text-xs text-zinc-500 truncate">
-                Add manually in seconds — works immediately with or without OAuth
+                Sign directly into YouTube Shorts or TikTok — no Firebase setup needed
               </p>
             </div>
           </div>
@@ -434,40 +436,25 @@ export const AddSocialAccountModal: React.FC<AddSocialAccountModalProps> = ({
         </div>
 
         <form onSubmit={handleSubmit} className="p-6 overflow-y-auto space-y-4">
-          {/* Storage sync status strip (non-blocking) */}
-          <div className="px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 flex items-center justify-between gap-2 text-[11px]">
-            <div className="flex items-center gap-1.5 text-zinc-400 min-w-0">
-              {user ? (
-                <>
-                  <Cloud className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                  <span className="truncate">
-                    Synced to <span className="text-zinc-200">{user.email || 'Google account'}</span>
-                  </span>
-                </>
-              ) : (
-                <>
-                  <HardDrive className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                  <span className="truncate">
-                    Instant local save · No login required
-                  </span>
-                </>
-              )}
-            </div>
-            {!user && (
-              <button
-                type="button"
-                onClick={signInWithGoogle}
-                disabled={isSigningIn}
-                className="text-emerald-400 hover:text-emerald-300 font-medium whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
-              >
-                {isSigningIn ? 'Signing in...' : 'Google Sync'}
-              </button>
-            )}
-          </div>
-
           {/* Entry Method Selector */}
           {!editingAccount && (
             <div className="grid grid-cols-3 gap-1.5 p-1 rounded-xl bg-zinc-950 border border-zinc-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setMode('oauth');
+                  setErrorMsg(null);
+                }}
+                className={`px-2.5 py-2 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                  mode === 'oauth'
+                    ? 'bg-zinc-800 text-white'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                <KeyRound className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span>Social Login</span>
+              </button>
+
               <button
                 type="button"
                 onClick={() => {
@@ -497,29 +484,193 @@ export const AddSocialAccountModal: React.FC<AddSocialAccountModalProps> = ({
                 }`}
               >
                 <Layers className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                <span>Add Both</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setMode('oauth');
-                  setErrorMsg(null);
-                }}
-                className={`px-2.5 py-2 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
-                  mode === 'oauth'
-                    ? 'bg-zinc-800 text-white'
-                    : 'text-zinc-400 hover:text-zinc-200'
-                }`}
-              >
-                <KeyRound className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                <span>OAuth</span>
+                <span>Quick Both</span>
               </button>
             </div>
           )}
 
-          {/* Platform Picker (for Manual or OAuth mode) */}
-          {!editingAccount && mode !== 'both' && (
+          {/* MODE: SOCIAL LOGIN (DIRECT OAUTH 2.0 SESSION — SEPARATE FROM FIREBASE) */}
+          {mode === 'oauth' && !editingAccount && (
+            <div className="space-y-3.5">
+              <div className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 space-y-3">
+                <div className="space-y-1">
+                  <div className="text-xs font-semibold text-zinc-100 flex items-center gap-1.5">
+                    <KeyRound className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Sign In Directly to Your Social Platforms</span>
+                  </div>
+                  <p className="text-[11px] text-zinc-400 leading-relaxed">
+                    Log into YouTube Shorts or TikTok via secure OAuth popup. Signed-in accounts are stored in an encrypted browser session cookie directly—no Firebase login required.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => handleConnectOAuth('shorts')}
+                    disabled={connectingPlatform !== null}
+                    className="px-4 py-3 rounded-xl bg-red-600/15 hover:bg-red-600/25 border border-red-500/40 text-zinc-100 text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    {connectingPlatform === 'shorts' ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-red-400" />
+                    ) : (
+                      <Youtube className="w-4 h-4 text-red-400" />
+                    )}
+                    <span>Sign in with YouTube</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleConnectOAuth('tiktok')}
+                    disabled={connectingPlatform !== null}
+                    className="px-4 py-3 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/40 text-zinc-100 text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    {connectingPlatform === 'tiktok' ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-cyan-400" />
+                    ) : (
+                      <Music2 className="w-4 h-4 text-cyan-400" />
+                    )}
+                    <span>Sign in with TikTok</span>
+                  </button>
+                </div>
+
+                {oauthSetupInfo && (
+                  <div className="pt-3 border-t border-zinc-800 space-y-2 text-[11px] text-zinc-400">
+                    <p className="text-amber-300 font-medium">
+                      Add your {PLATFORM_PRESETS[oauthSetupInfo.platform].label} OAuth client credentials to server secrets to enable live popup sign-in (or switch to Manual anytime):
+                    </p>
+                    <div className="font-mono text-[10px] text-zinc-300 bg-zinc-900 p-2.5 rounded border border-zinc-800 space-y-1.5">
+                      <div>
+                        Required env vars:{' '}
+                        <span className="text-emerald-400">
+                          {oauthSetupInfo.requiredEnvVars.join(', ')}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="truncate">Callback: {oauthSetupInfo.redirectUri}</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText(oauthSetupInfo.redirectUri);
+                            setCopiedUri(true);
+                            setTimeout(() => setCopiedUri(false), 1500);
+                          }}
+                          className="text-emerald-400 hover:text-emerald-300 shrink-0 inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          {copiedUri ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                          <span>{copiedUri ? 'Copied' : 'Copy'}</span>
+                        </button>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      {oauthSetupInfo.setupGuideUrl && (
+                        <a
+                          href={oauthSetupInfo.setupGuideUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-emerald-400 hover:text-emerald-300 font-medium"
+                        >
+                          <span>Open Developer Console</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setMode('manual')}
+                        className="text-zinc-300 hover:text-white underline underline-offset-2 cursor-pointer"
+                      >
+                        Add @handle manually →
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Active Signed-In Social Session Accounts */}
+              {sessionAccounts.length > 0 && (
+                <div className="p-3.5 rounded-xl bg-zinc-950 border border-emerald-500/30 space-y-2">
+                  <div className="text-[11px] font-semibold text-emerald-400 uppercase tracking-wider">
+                    Signed-In Social Session ({sessionAccounts.length})
+                  </div>
+                  <div className="space-y-1.5">
+                    {sessionAccounts.map((acc) => (
+                      <div
+                        key={acc.id}
+                        className="flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg bg-zinc-900 border border-zinc-800 text-xs"
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          {platformIcon[acc.platform]}
+                          <div className="min-w-0">
+                            <div className="font-medium text-zinc-100 truncate">
+                              {acc.displayName}
+                            </div>
+                            <div className="text-[11px] font-mono text-zinc-400 truncate">
+                              {acc.handle}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0 text-[11px]">
+                          {!acc.isDefault ? (
+                            <button
+                              type="button"
+                              onClick={() => setDefaultSocialAccount(acc.id, acc.platform)}
+                              className="text-zinc-400 hover:text-emerald-400 cursor-pointer"
+                            >
+                              Set Primary
+                            </button>
+                          ) : (
+                            <span className="text-emerald-400 font-semibold">Primary</span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => removeSocialAccount(acc.id)}
+                            className="text-zinc-500 hover:text-rose-400 cursor-pointer"
+                          >
+                            Log out
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Optional Cloud Sync Strip (shown only for Manual/Quick-Both modes) */}
+          {mode !== 'oauth' && (
+            <div className="px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-800 flex items-center justify-between gap-2 text-[11px]">
+              <div className="flex items-center gap-1.5 text-zinc-400 min-w-0">
+                {user ? (
+                  <>
+                    <Cloud className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span className="truncate">
+                      Manual entries synced to <span className="text-zinc-200">{user.email || 'Google account'}</span>
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <HardDrive className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span className="truncate">
+                      Manual entries save locally in browser (Firebase optional)
+                    </span>
+                  </>
+                )}
+              </div>
+              {!user && (
+                <button
+                  type="button"
+                  onClick={signInWithGoogle}
+                  disabled={isSigningIn}
+                  className="text-emerald-400 hover:text-emerald-300 font-medium whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                >
+                  {isSigningIn ? 'Signing in...' : 'Google Sync'}
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Platform Picker (for Manual mode only) */}
+          {!editingAccount && mode === 'manual' && (
             <div className="space-y-1.5">
               <label className="block text-xs font-medium text-zinc-300">Platform</label>
               <div className="grid grid-cols-2 gap-2">
@@ -543,89 +694,6 @@ export const AddSocialAccountModal: React.FC<AddSocialAccountModalProps> = ({
                   );
                 })}
               </div>
-            </div>
-          )}
-
-          {/* MODE: OAUTH */}
-          {mode === 'oauth' && !editingAccount && (
-            <div className="p-4 rounded-xl bg-zinc-950 border border-zinc-800 space-y-3">
-              <div className="flex items-start justify-between gap-3">
-                <div className="space-y-1">
-                  <div className="text-xs font-semibold text-zinc-100 flex items-center gap-1.5">
-                    <KeyRound className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>Connect via {preset.label} OAuth 2.0</span>
-                  </div>
-                  <p className="text-[11px] text-zinc-400 leading-relaxed">
-                    Authorize {preset.label} directly to pull verified handle, avatar, and live subscriber counts.
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleConnectOAuth}
-                  disabled={isConnectingOAuth}
-                  className="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-semibold cursor-pointer inline-flex items-center gap-1.5 disabled:opacity-50"
-                >
-                  {isConnectingOAuth ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  ) : (
-                    <Link2 className="w-3.5 h-3.5" />
-                  )}
-                  <span>Connect {preset.shortLabel} OAuth</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setMode('manual')}
-                  className="px-3 py-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-xs font-medium text-zinc-200 cursor-pointer"
-                >
-                  Use Manual Entry Instead
-                </button>
-              </div>
-
-              {oauthSetupInfo && (
-                <div className="pt-3 border-t border-zinc-800 space-y-2 text-[11px] text-zinc-400">
-                  <p className="text-amber-300 font-medium">
-                    OAuth app credentials are not configured on this server yet. You can switch to Manual Entry right now with zero setup, or add these environment secrets:
-                  </p>
-                  <div className="font-mono text-[10px] text-zinc-300 bg-zinc-900 p-2.5 rounded border border-zinc-800 space-y-1">
-                    <div>
-                      Secrets:{' '}
-                      <span className="text-emerald-400">
-                        {oauthSetupInfo.requiredEnvVars.join(', ')}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="truncate">Callback: {oauthSetupInfo.redirectUri}</span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          navigator.clipboard.writeText(oauthSetupInfo.redirectUri);
-                          setCopiedUri(true);
-                          setTimeout(() => setCopiedUri(false), 1500);
-                        }}
-                        className="text-emerald-400 hover:text-emerald-300 shrink-0 inline-flex items-center gap-1 cursor-pointer"
-                      >
-                        {copiedUri ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                        <span>{copiedUri ? 'Copied' : 'Copy'}</span>
-                      </button>
-                    </div>
-                  </div>
-                  {oauthSetupInfo.setupGuideUrl && (
-                    <a
-                      href={oauthSetupInfo.setupGuideUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-emerald-400 hover:text-emerald-300 font-medium"
-                    >
-                      <span>Open Developer Console</span>
-                      <ExternalLink className="w-3 h-3" />
-                    </a>
-                  )}
-                </div>
-              )}
             </div>
           )}
 

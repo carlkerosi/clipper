@@ -1,12 +1,13 @@
 # Firestore Security Specification
 
 ## Data Invariants
-1. Every document under `/users/{userId}` and its subcollections (`socialAccounts`, `publishedClips`) is strictly scoped to the verified owner (`request.auth.uid == userId` and `request.auth.token.email_verified == true`).
-2. Users cannot list `/users` or read any other user's profile, connected social accounts, or publishing records.
+1. Every document under `/users/{userId}` and its subcollections (`socialAccounts`, `publishedClips`, `preferences`, `clipDrafts`) is strictly scoped to the verified owner (`request.auth.uid == userId` and `request.auth.token.email_verified == true`).
+2. Users cannot list `/users` or read any other user's profile, connected social accounts, publishing records, preferences, or clip drafts.
 3. Subcollection writes require the parent `/users/{userId}` document to exist (or be created atomically in the same batch) and forbid modifying immutable ownership or timestamp fields (`id`, `userId`, `uid`, `clipId`, `createdAt`).
 4. All `createdAt` and `updatedAt` timestamps must match `request.time` (server timestamp).
-5. All URL fields (`profileUrl`, `avatarUrl`, `photoUrl`, `postUrl`) only allow empty strings or `http://` / `https://` URLs within strict length limits.
+5. All URL fields (`profileUrl`, `avatarUrl`, `photoUrl`, `postUrl`, `youtubeUrl`) only allow empty strings or `http://` / `https://` URLs within strict length limits, and draft media paths (`videoUrl`, `playableSourceUrl`, `clipVideoUrl`, `downloadUrl`) forbid `javascript:` or `blob:` URIs.
 6. Once a `publishedClips` record reaches `status == 'published'`, it cannot regress to `'exported'` or `'scheduled'`.
+7. Auto-drafts (`clipDrafts`) validate strict map keys and bounded caption/hashtag/emoji array sizes to prevent shadow fields or resource exhaustion.
 
 ## Adversarial Test Cases ("Dirty Dozen")
 1. Cross-user `get` on `/users/other_uid/socialAccounts/acc_1` -> `PERMISSION_DENIED`
@@ -19,5 +20,5 @@
 8. Spoofed client timestamp (`createdAt` != `request.time`) -> `PERMISSION_DENIED`
 9. Mutating immutable `createdAt` or `userId` on update -> `PERMISSION_DENIED`
 10. Regressing terminal `status: 'published'` back to `'exported'` -> `PERMISSION_DENIED`
-11. XSS URI injection (`javascript:alert(1)`) in `postUrl` or `profileUrl` -> `PERMISSION_DENIED`
-12. Negative view/follower counter (`views: -5` or `followersCount: -1`) -> `PERMISSION_DENIED`
+11. XSS URI injection (`javascript:alert(1)`) in `postUrl`, `profileUrl`, or `clipDrafts` `video.videoUrl` -> `PERMISSION_DENIED`
+12. Negative view/follower counter (`views: -5` or `followersCount: -1`) or shadow key injection in `clipDrafts` -> `PERMISSION_DENIED`

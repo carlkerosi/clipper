@@ -4,6 +4,11 @@ import { parseJsonResponse } from './safeFetchJson';
 
 export type ExportPlatform = 'shorts' | 'tiktok';
 
+export function isYoutubeWebUrl(url?: string): boolean {
+  if (!url) return false;
+  return /(?:youtube\.com|youtu\.be)/i.test(url);
+}
+
 export interface PlatformPresetConfig {
   id: ExportPlatform;
   label: string;
@@ -215,9 +220,11 @@ export async function renderServerClipForPlatform(options: {
   const response = await fetch('/api/clip-video', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(100000),
     body: JSON.stringify({
       videoUrl: videoSource.videoUrl,
       playableSourceUrl: videoSource.playableSourceUrl,
+      clipVideoUrl: clip.clipVideoUrl,
       youtubeUrl: videoSource.youtubeUrl,
       startTime: clip.startTime,
       duration: clipDur,
@@ -254,7 +261,7 @@ export async function renderServerClipForPlatform(options: {
     throw new Error(data.error || `Export failed (${response.status})`);
   }
 
-  const fileRes = await fetch(data.downloadUrl);
+  const fileRes = await fetch(data.downloadUrl, { signal: AbortSignal.timeout(45000) });
   if (!fileRes.ok) {
     throw new Error('Could not download rendered MP4 clip.');
   }
@@ -301,6 +308,7 @@ export async function mergeSelectedClipsCompilation(options: {
   const response = await fetch('/api/merge-clips', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    signal: AbortSignal.timeout(125000),
     body: JSON.stringify({
       videoUrl: videoSource.videoUrl,
       playableSourceUrl: videoSource.playableSourceUrl,
@@ -324,22 +332,24 @@ export async function mergeSelectedClipsCompilation(options: {
       filterSaturate: settings.filterSaturate ?? 100,
       playbackSpeed: settings.playbackSpeed ?? 1,
       normalizeAudio: settings.normalizeAudio ?? true,
-      title: videoSource.title || 'compilation',
+      showHookBanner: Boolean(settings.showHookBanner),
+      hookBannerText: settings.hookBannerText || clips[0]?.hook || '',
+      title: videoSource.title || 'highlight_reel',
       platform,
     }),
   });
 
-  const data = await parseJsonResponse(response, 'Compilation merge failed');
+  const data = await parseJsonResponse(response, 'Highlight reel export failed');
   if (!response.ok || !data.downloadUrl) {
-    throw new Error(data.error || `Compilation merge failed (${response.status})`);
+    throw new Error(data.error || `Highlight reel export failed (${response.status})`);
   }
 
-  const fileRes = await fetch(data.downloadUrl);
+  const fileRes = await fetch(data.downloadUrl, { signal: AbortSignal.timeout(45000) });
   if (!fileRes.ok) {
-    throw new Error('Could not download merged compilation MP4.');
+    throw new Error('Could not download consolidated highlight reel MP4.');
   }
   const blob = await fileRes.blob();
-  const filename = data.filename || `clipforge_${platform}_compilation.mp4`;
+  const filename = data.filename || `clipforge_${platform}_highlight_reel.mp4`;
   downloadBlob(blob, filename);
 
   const captionCopied = clips[0]

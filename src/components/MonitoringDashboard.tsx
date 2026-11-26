@@ -506,8 +506,8 @@ export const MonitoringDashboard: React.FC<MonitoringDashboardProps> = ({
           </h1>
           <p className="text-xs text-zinc-400">
             {user
-              ? `Synced to ${user.email || user.displayName || 'your account'} · Every export and post update persists automatically.`
-              : 'Saved locally in your browser — add YouTube Shorts & TikTok accounts manually anytime, or sign in with Google to cloud-sync.'}
+              ? `Cloud sync active (${user.email || user.displayName || 'Google'}) · Social OAuth logins also persist in your encrypted session independently.`
+              : 'Sign directly into YouTube Shorts or TikTok via Social Login (no Firebase required), or add handles locally.'}
           </p>
         </div>
 
@@ -518,7 +518,7 @@ export const MonitoringDashboard: React.FC<MonitoringDashboardProps> = ({
             className="px-4 py-2 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
           >
             <Plus className="w-3.5 h-3.5" />
-            <span>Add Social Account</span>
+            <span>Connect Social Login</span>
           </button>
 
           <button
@@ -740,7 +740,7 @@ export const MonitoringDashboard: React.FC<MonitoringDashboardProps> = ({
                       ) : list.length === 0 ? (
                         <div className="p-5 text-center space-y-2.5">
                           <p className="text-xs text-zinc-500">
-                            No {preset.label} account added yet.
+                            No {preset.label} account connected yet.
                           </p>
                           <button
                             type="button"
@@ -748,7 +748,7 @@ export const MonitoringDashboard: React.FC<MonitoringDashboardProps> = ({
                             className="px-3 py-1.5 rounded-lg bg-zinc-950 hover:bg-zinc-800 border border-zinc-800 text-xs font-medium text-zinc-200 inline-flex items-center gap-1.5 cursor-pointer"
                           >
                             <Plus className="w-3.5 h-3.5 text-emerald-400" />
-                            <span>Add {preset.shortLabel} Account</span>
+                            <span>Sign in with {preset.shortLabel}</span>
                           </button>
                         </div>
                       ) : (
@@ -803,7 +803,21 @@ export const MonitoringDashboard: React.FC<MonitoringDashboardProps> = ({
                             </div>
 
                             <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-zinc-400 font-mono tabular-nums">
-                              <span>{acc.connectionType === 'oauth' ? 'OAuth' : 'Linked'}</span>
+                              <span
+                                className={
+                                  acc.storageSource === 'oauth_session'
+                                    ? 'text-emerald-400 font-semibold'
+                                    : ''
+                                }
+                              >
+                                {acc.storageSource === 'oauth_session'
+                                  ? 'OAuth Session'
+                                  : acc.connectionType === 'oauth'
+                                    ? 'OAuth'
+                                    : acc.storageSource === 'firebase'
+                                      ? 'Cloud Linked'
+                                      : 'Local Linked'}
+                              </span>
                               <span aria-hidden="true">·</span>
                               <span>
                                 {formatCompactNum(acc.followersCount)}{' '}

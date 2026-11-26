@@ -83,6 +83,14 @@ export interface VideoSource {
   highlights: ClipHighlight[];
 }
 
+export interface AutoExportConfig {
+  enabled: boolean;
+  platform: SocialPlatform;
+  mode: 'batch' | 'reel';
+  resolution: '1080p' | '720p';
+  burnCaptions: boolean;
+}
+
 export interface ClipGenerationOptions {
   videoSource: VideoSource;
   focusCategory: string;
@@ -92,6 +100,7 @@ export interface ClipGenerationOptions {
   minDurationSec?: number;
   maxDurationSec?: number;
   appendExisting?: boolean;
+  autoExport?: AutoExportConfig;
 }
 
 export type CaptionEntranceAnimation =
@@ -157,6 +166,8 @@ export type SocialPlatform = 'shorts' | 'tiktok';
 
 export type AccountConnectionType = 'oauth' | 'linked';
 
+export type AccountStorageSource = 'oauth_session' | 'firebase' | 'local';
+
 export interface SocialAccount {
   id: string;
   userId: string;
@@ -166,6 +177,7 @@ export interface SocialAccount {
   profileUrl: string;
   avatarUrl: string;
   connectionType: AccountConnectionType;
+  storageSource?: AccountStorageSource;
   isDefault: boolean;
   followersCount: number;
   postsCount: number;
@@ -215,3 +227,33 @@ export interface WorkspacePreferences {
   createdAt?: unknown;
   updatedAt?: unknown;
 }
+
+export interface ClipDraftVideoSummary {
+  id: string;
+  title: string;
+  creator: string;
+  channelName: string;
+  duration: number;
+  thumbnail: string;
+  videoUrl: string;
+  playableSourceUrl: string;
+  sourceType: 'youtube' | 'upload' | 'sample' | 'url';
+  youtubeUrl: string;
+  youtubeVideoId: string;
+  youtubeDownloadBlocked: boolean;
+  description: string;
+  transcript: string;
+}
+
+export interface ClipDraft {
+  id: string;
+  userId: string;
+  appMode: 'feed' | 'studio';
+  currentTime: number;
+  video: ClipDraftVideoSummary;
+  clip: ClipHighlight;
+  settings: ExportSettings;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+

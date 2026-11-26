@@ -306,6 +306,63 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "ClipDraft": {
+      "title": "ClipDraft",
+      "description": "Auto-saved editing state for an active clip, video source context, and Studio 9:16 settings persisted every 30 seconds for session recovery.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "appMode": {
+          "type": "string",
+          "enum": ["feed", "studio"]
+        },
+        "currentTime": {
+          "type": "number"
+        },
+        "video": {
+          "type": "object",
+          "description": "Compact source video metadata for resuming playback and timeline boundaries."
+        },
+        "clip": {
+          "type": "object",
+          "description": "Active ClipHighlight state including trim range, hook, framing, and edited captions."
+        },
+        "settings": {
+          "type": "object",
+          "description": "Studio 9:16 caption styling, color grading, playback speed, and audio mastering settings."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "appMode",
+        "currentTime",
+        "video",
+        "clip",
+        "settings",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -324,6 +381,10 @@
     "/users/{userId}/preferences/{prefId}": {
       "schema": { "$ref": "#/entities/WorkspacePreferences" },
       "description": "Persisted auto-apply preferences for social routing, AI framing, style defaults, and live stats syncing."
+    },
+    "/users/{userId}/clipDrafts/{draftId}": {
+      "schema": { "$ref": "#/entities/ClipDraft" },
+      "description": "Auto-saved clip editing state persisted every 30 seconds so creators can resume across closed browser tabs."
     }
   }
 }

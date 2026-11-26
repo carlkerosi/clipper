@@ -10,6 +10,8 @@ import {
   Repeat,
   Sparkles,
   Loader2,
+  ArrowRightToLine,
+  ArrowLeftToLine,
 } from 'lucide-react';
 import { ClipHighlight, ExportSettings, FramingMode } from '../types';
 import { drawVerticalFrame } from '../utils/captionRenderer';
@@ -18,8 +20,15 @@ import { parseJsonResponse } from '../utils/safeFetchJson';
 
 function extractYoutubeVideoId(url?: string): string {
   if (!url) return '';
-  const match = url.match(/^.*(youtu.be\/|v\/|u\/\w\/|embed\/|shorts\/|watch\?v=|&v=)([^#&?]*).*/);
+  const match = url.match(/^.*(youtu.be\/|v\/|u\/\w\/|embed\/|shorts\/|live\/|watch\?v=|&v=)([^#&?]*).*/);
   return match && match[2] && match[2].length === 11 ? match[2] : '';
+}
+
+export interface TrimMarkerFeedback {
+  edge: 'in' | 'out';
+  time: number;
+  nonce: number;
+  note?: string;
 }
 
 interface VerticalStudioPreviewProps {
@@ -29,11 +38,17 @@ interface VerticalStudioPreviewProps {
   youtubeVideoId?: string;
   youtubeDownloadBlocked?: boolean;
   thumbnail?: string;
+  totalVideoDuration?: number;
   activeClip: ClipHighlight;
   settings: ExportSettings;
   onUpdateSettings: (newSettings: Partial<ExportSettings>) => void;
   videoRef: React.RefObject<HTMLVideoElement | null>;
   onTimeUpdate?: (currentTime: number) => void;
+  onSeekSourceTime?: (time: number) => void;
+  onSetInPoint?: () => void;
+  onSetOutPoint?: () => void;
+  trimFeedback?: TrimMarkerFeedback | null;
+  playToggleNonce?: number;
 }
 
 export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
@@ -42,23 +57,36 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
   youtubeUrl,
   youtubeVideoId,
   thumbnail,
+  totalVideoDuration = 300,
   activeClip,
   settings,
   onUpdateSettings,
   videoRef,
   onTimeUpdate,
+  onSeekSourceTime,
+  onSetInPoint,
+  onSetOutPoint,
+  trimFeedback,
+  playToggleNonce = 0,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const scrubRef = useRef<HTMLDivElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTimeInClip, setCurrentTimeInClip] = useState(0);
+  const [sourcePlayheadSec, setSourcePlayheadSec] = useState(activeClip.startTime);
   const [isMuted, setIsMuted] = useState(false);
   const [showSafeZones, setShowSafeZones] = useState(false);
   const [isLooping, setIsLooping] = useState(true);
+  const [playbackScope, setPlaybackScope] = useState<'clip' | 'full'>('clip');
   const [videoError, setVideoError] = useState<string | null>(null);
   const [isAutoReframing, setIsAutoReframing] = useState(false);
   const [reframeNote, setReframeNote] = useState<string | null>(null);
+  const [visibleTrimHud, setVisibleTrimHud] = useState<TrimMarkerFeedback | null>(null);
   const embedRelTimeRef = useRef(0);
+  const prevClipIdRef = useRef<string>(activeClip.id);
+  const prevSourceRef = useRef<string>('');
+  const lastHandledPlayNonceRef = useRef<number>(playToggleNonce);
 
   const directFullSource =
     playableSourceUrl ||
@@ -79,12 +107,40 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
     : directFullSource || activeClip.clipVideoUrl || '/samples/podcast.mp4';
 
   const clipDuration = Math.max(1, activeClip.endTime - activeClip.startTime);
+  const effectiveTotalDuration = Math.max(
+    clipDuration,
+    totalVideoDuration || 0,
+    activeClip.endTime,
+    videoRef.current && Number.isFinite(videoRef.current.duration) && !isClipOnlyMode
+      ? videoRef.current.duration
+      : 0
+  );
 
-  // Sync video element time to clip start time cleanly whenever clip or source switches
+  // Show transient HUD badge inside the player viewport whenever In/Out marker is set
   useEffect(() => {
+    if (!trimFeedback) return;
+    setVisibleTrimHud(trimFeedback);
+    const timer = window.setTimeout(() => {
+      setVisibleTrimHud((cur) => (cur?.nonce === trimFeedback.nonce ? null : cur));
+    }, 1600);
+    return () => window.clearTimeout(timer);
+  }, [trimFeedback]);
+
+  // Sync video element time cleanly when clip ID or video source switches (without stuttering live trims)
+  useEffect(() => {
+    const clipSwitched = prevClipIdRef.current !== activeClip.id;
+    const sourceSwitched = prevSourceRef.current !== activeVideoSource;
+    prevClipIdRef.current = activeClip.id;
+    prevSourceRef.current = activeVideoSource;
+
+    if (!clipSwitched && !sourceSwitched) {
+      return;
+    }
+
     setVideoError(null);
     embedRelTimeRef.current = 0;
     setCurrentTimeInClip(0);
+    setSourcePlayheadSec(activeClip.startTime);
     if (onTimeUpdate) {
       onTimeUpdate(activeClip.startTime);
     }
@@ -100,7 +156,9 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
 
     const seekToStart = () => {
       try {
-        video.currentTime = startPos;
+        if (Math.abs(video.currentTime - startPos) > 0.25) {
+          video.currentTime = startPos;
+        }
       } catch {}
     };
 
@@ -110,7 +168,7 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
       video.addEventListener('loadedmetadata', seekToStart, { once: true });
       video.addEventListener('canplay', seekToStart, { once: true });
     }
-  }, [activeClip.id, activeClip.startTime, isClipOnlyMode, isYoutubeEmbedMode, activeVideoSource]);
+  }, [activeClip.id, activeClip.startTime, isClipOnlyMode, isYoutubeEmbedMode, activeVideoSource, onTimeUpdate, videoRef]);
 
   // Sync video playbackRate live
   useEffect(() => {
@@ -120,7 +178,7 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
     if (video.playbackRate !== speed) {
       video.playbackRate = speed;
     }
-  }, [settings.playbackSpeed, activeVideoSource]);
+  }, [settings.playbackSpeed, activeVideoSource, videoRef]);
 
   // Main Canvas Rendering animation loop
   useEffect(() => {
@@ -143,7 +201,7 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
       if (isYoutubeEmbedMode) {
         if (isPlaying) {
           embedRelTimeRef.current += dt * speed;
-          if (embedRelTimeRef.current >= clipDuration) {
+          if (embedRelTimeRef.current >= clipDuration && playbackScope === 'clip') {
             if (isLooping) {
               embedRelTimeRef.current = 0;
             } else {
@@ -153,9 +211,11 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
           }
         }
         relTime = embedRelTimeRef.current;
+        const absSource = activeClip.startTime + relTime;
         setCurrentTimeInClip(relTime);
+        setSourcePlayheadSec(absSource);
         if (onTimeUpdate) {
-          onTimeUpdate(activeClip.startTime + relTime);
+          onTimeUpdate(absSource);
         }
       } else if (video && video.readyState >= 1) {
         if (video.playbackRate !== speed) {
@@ -163,24 +223,35 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
         }
         relTime = isClipOnlyMode
           ? video.currentTime
-          : Math.max(0, video.currentTime - activeClip.startTime);
+          : video.currentTime - activeClip.startTime;
+
+        const absSource = isClipOnlyMode
+          ? activeClip.startTime + video.currentTime
+          : video.currentTime;
 
         setCurrentTimeInClip(relTime);
+        setSourcePlayheadSec(absSource);
         if (onTimeUpdate) {
-          onTimeUpdate(
-            isClipOnlyMode
-              ? activeClip.startTime + video.currentTime
-              : video.currentTime
-          );
+          onTimeUpdate(absSource);
         }
 
-        const maxThreshold = isClipOnlyMode
-          ? video.duration || clipDuration
-          : activeClip.endTime;
+        if (playbackScope === 'clip') {
+          const maxThreshold = isClipOnlyMode
+            ? video.duration || clipDuration
+            : activeClip.endTime;
 
-        if (!video.paused && video.currentTime >= maxThreshold - 0.1) {
+          if (!video.paused && video.currentTime >= maxThreshold - 0.08) {
+            if (isLooping) {
+              video.currentTime = isClipOnlyMode ? 0 : activeClip.startTime;
+              video.play().catch(() => {});
+            } else {
+              video.pause();
+              setIsPlaying(false);
+            }
+          }
+        } else if (!video.paused && video.duration && video.currentTime >= video.duration - 0.08) {
           if (isLooping) {
-            video.currentTime = isClipOnlyMode ? 0 : activeClip.startTime;
+            video.currentTime = 0;
             video.play().catch(() => {});
           } else {
             video.pause();
@@ -233,6 +304,7 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
     settings,
     showSafeZones,
     isLooping,
+    playbackScope,
     clipDuration,
     isClipOnlyMode,
     isYoutubeEmbedMode,
@@ -290,15 +362,55 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
       : activeClip.endTime;
 
     if (video.paused) {
-      const targetPos =
-        video.currentTime >= endPos - 0.2 ||
-        (!isClipOnlyMode && video.currentTime < startPos)
-          ? startPos
-          : video.currentTime;
+      let targetPos = video.currentTime;
+      if (playbackScope === 'clip') {
+        if (video.currentTime >= endPos - 0.2 || (!isClipOnlyMode && video.currentTime < startPos)) {
+          targetPos = startPos;
+        }
+      } else if (video.duration && video.currentTime >= video.duration - 0.2) {
+        targetPos = 0;
+      }
       await ensureLoadedAndPlay(targetPos);
     } else {
       video.pause();
       setIsPlaying(false);
+    }
+  };
+
+  const togglePlayRef = useRef(togglePlay);
+  togglePlayRef.current = togglePlay;
+
+  useEffect(() => {
+    if (playToggleNonce === lastHandledPlayNonceRef.current) return;
+    lastHandledPlayNonceRef.current = playToggleNonce;
+    togglePlayRef.current();
+  }, [playToggleNonce]);
+
+  const handlePlayerScrubPointer = (clientX: number) => {
+    if (!scrubRef.current) return;
+    const rect = scrubRef.current.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
+    const targetTime = Math.round(ratio * effectiveTotalDuration * 10) / 10;
+
+    if (!isClipOnlyMode && (targetTime < activeClip.startTime || targetTime > activeClip.endTime)) {
+      setPlaybackScope('full');
+    }
+
+    if (isYoutubeEmbedMode) {
+      embedRelTimeRef.current = targetTime - activeClip.startTime;
+    }
+
+    setSourcePlayheadSec(targetTime);
+    setCurrentTimeInClip(targetTime - activeClip.startTime);
+
+    if (onSeekSourceTime) {
+      onSeekSourceTime(targetTime);
+    } else if (videoRef.current) {
+      try {
+        videoRef.current.currentTime = isClipOnlyMode
+          ? Math.max(0, targetTime - activeClip.startTime)
+          : targetTime;
+      } catch {}
     }
   };
 
@@ -366,10 +478,15 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
     }
   };
 
-  const formatSec = (s: number) => {
-    const m = Math.floor(s / 60);
-    const sec = Math.floor(s % 60);
-    return `${m}:${String(sec).padStart(2, '0')}`;
+  const formatSec = (s: number, tenths = false) => {
+    const safe = Math.max(0, s);
+    const m = Math.floor(safe / 60);
+    const sec = Math.floor(safe % 60);
+    if (!tenths) {
+      return `${m}:${String(sec).padStart(2, '0')}`;
+    }
+    const ms = Math.floor((safe % 1) * 10);
+    return `${m}:${String(sec).padStart(2, '0')}.${ms}`;
   };
 
   const useCanvasVideoComposite = settings.framingMode !== 'smart_crop';
@@ -487,6 +604,29 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
             </div>
           )}
 
+          {visibleTrimHud && (
+            <div
+              key={visibleTrimHud.nonce}
+              className={`absolute top-8 left-1/2 -translate-x-1/2 z-30 px-3 py-1.5 rounded-lg border backdrop-blur-md shadow-xl flex items-center gap-2 pointer-events-none whitespace-nowrap transition-opacity duration-150 ${
+                visibleTrimHud.edge === 'in'
+                  ? 'bg-emerald-950/90 border-emerald-400/60 text-emerald-200'
+                  : 'bg-violet-950/90 border-violet-400/60 text-violet-200'
+              }`}
+            >
+              {visibleTrimHud.edge === 'in' ? (
+                <ArrowRightToLine className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              ) : (
+                <ArrowLeftToLine className="w-3.5 h-3.5 text-violet-400 shrink-0" />
+              )}
+              <span className="text-[11px] font-mono font-bold tabular-nums">
+                {visibleTrimHud.edge === 'in' ? 'IN' : 'OUT'} {formatSec(visibleTrimHud.time, true)}
+              </span>
+              {visibleTrimHud.note && (
+                <span className="text-[10px] text-zinc-300">{visibleTrimHud.note}</span>
+              )}
+            </div>
+          )}
+
           {!isPlaying && !videoError && (
             <div
               onClick={togglePlay}
@@ -556,55 +696,146 @@ export const VerticalStudioPreview: React.FC<VerticalStudioPreviewProps> = ({
         </div>
       )}
 
-      {/* Bottom Playback Bar */}
-      <div className="w-full flex items-center justify-between gap-3 mt-2 pt-2.5 border-t border-zinc-800">
-        <div className="flex items-center gap-1.5">
-          <button
-            onClick={togglePlay}
-            className="p-2 rounded-lg bg-white hover:bg-zinc-200 text-zinc-950 font-semibold transition-colors cursor-pointer"
-            title={isPlaying ? 'Pause' : 'Play'}
-          >
-            {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}
-          </button>
-
-          <button
-            onClick={restartClip}
-            className="p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors cursor-pointer"
-            title="Restart"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-          </button>
-
-          <button
-            onClick={toggleMute}
-            className="p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors cursor-pointer"
-            title={isMuted ? 'Unmute' : 'Mute'}
-          >
-            {isMuted ? (
-              <VolumeX className="w-3.5 h-3.5 text-zinc-400" />
-            ) : (
-              <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
-            )}
-          </button>
-
-          <div className="text-xs font-mono tabular-nums text-zinc-400 pl-1.5">
-            <span className="text-zinc-100 font-semibold">{formatSec(currentTimeInClip)}</span>
-            <span className="text-zinc-600"> / </span>
-            <span>{formatSec(clipDuration)}</span>
-          </div>
+      {/* Player Interactive Source Scrub Bar + In/Out Markers */}
+      <div className="w-full mt-2 space-y-1.5">
+        <div
+          ref={scrubRef}
+          onPointerDown={(e) => {
+            e.currentTarget.setPointerCapture(e.pointerId);
+            handlePlayerScrubPointer(e.clientX);
+          }}
+          onPointerMove={(e) => {
+            if (e.buttons === 1) {
+              handlePlayerScrubPointer(e.clientX);
+            }
+          }}
+          className="relative h-3 w-full rounded-full bg-zinc-950 border border-zinc-800 cursor-pointer select-none overflow-hidden group"
+          title="Scrub video timeline — click outside clip bounds to preview full source"
+        >
+          {/* Active Clip Window */}
+          <div
+            className="absolute top-0 bottom-0 bg-violet-500/35 border-x-2 border-emerald-400"
+            style={{
+              left: `${Math.max(0, Math.min(100, (activeClip.startTime / effectiveTotalDuration) * 100))}%`,
+              width: `${Math.max(
+                1.5,
+                Math.min(
+                  100,
+                  ((activeClip.endTime - activeClip.startTime) / effectiveTotalDuration) * 100
+                )
+              )}%`,
+              borderLeftColor: '#34D399',
+              borderRightColor: '#A78BFA',
+            }}
+          />
+          {/* Playhead Position */}
+          <div
+            className="absolute top-0 bottom-0 w-0.5 bg-white shadow-[0_0_6px_rgba(255,255,255,0.9)] pointer-events-none"
+            style={{
+              left: `${Math.max(0, Math.min(100, (sourcePlayheadSec / effectiveTotalDuration) * 100))}%`,
+            }}
+          />
         </div>
 
-        <button
-          onClick={() => setIsLooping(!isLooping)}
-          className={`flex items-center gap-1 px-2.5 py-1 text-xs font-medium rounded-md border transition-colors cursor-pointer ${
-            isLooping
-              ? 'bg-zinc-800 text-white border-zinc-700'
-              : 'bg-zinc-950 text-zinc-500 border-zinc-800'
-          }`}
-        >
-          <Repeat className="w-3 h-3" />
-          <span>Loop</span>
-        </button>
+        {/* Bottom Playback & Direct Trim Marker Bar */}
+        <div className="w-full flex flex-wrap items-center justify-between gap-2 pt-1.5 border-t border-zinc-800">
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={togglePlay}
+              className="p-2 rounded-lg bg-white hover:bg-zinc-200 text-zinc-950 font-semibold transition-colors cursor-pointer shrink-0"
+              title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
+            >
+              {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5 ml-0.5" />}
+            </button>
+
+            <button
+              onClick={restartClip}
+              className="p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors cursor-pointer shrink-0"
+              title="Jump to Clip Start ([)"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              onClick={toggleMute}
+              className="p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition-colors cursor-pointer shrink-0"
+              title={isMuted ? 'Unmute' : 'Mute'}
+            >
+              {isMuted ? (
+                <VolumeX className="w-3.5 h-3.5 text-zinc-400" />
+              ) : (
+                <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+              )}
+            </button>
+
+            <div className="text-xs font-mono tabular-nums text-zinc-400 pl-1 whitespace-nowrap">
+              <span className="text-zinc-100 font-semibold">{formatSec(sourcePlayheadSec, true)}</span>
+              <span className="text-zinc-600"> · </span>
+              <span className="text-violet-300">{formatSec(clipDuration)}</span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            {onSetInPoint && (
+              <button
+                type="button"
+                onClick={onSetInPoint}
+                title="Set Start (In) trim marker at current playhead (Ctrl+[)"
+                className="flex items-center gap-1 px-2 py-1 rounded-md bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/35 text-[11px] font-medium whitespace-nowrap shrink-0 transition-colors cursor-pointer"
+              >
+                <ArrowRightToLine className="w-3 h-3" />
+                <span>In</span>
+                <kbd className="hidden xl:inline text-[9px] font-mono text-emerald-200/80 bg-emerald-950/80 px-1 rounded">
+                  Ctrl+[
+                </kbd>
+              </button>
+            )}
+
+            {onSetOutPoint && (
+              <button
+                type="button"
+                onClick={onSetOutPoint}
+                title="Set End (Out) trim marker at current playhead (Ctrl+])"
+                className="flex items-center gap-1 px-2 py-1 rounded-md bg-violet-500/15 hover:bg-violet-500/25 text-violet-300 border border-violet-500/35 text-[11px] font-medium whitespace-nowrap shrink-0 transition-colors cursor-pointer"
+              >
+                <ArrowLeftToLine className="w-3 h-3" />
+                <span>Out</span>
+                <kbd className="hidden xl:inline text-[9px] font-mono text-violet-200/80 bg-violet-950/80 px-1 rounded">
+                  Ctrl+]
+                </kbd>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setPlaybackScope((prev) => (prev === 'clip' ? 'full' : 'clip'))}
+              title={
+                playbackScope === 'clip'
+                  ? 'Currently locked to clip bounds — switch to Full Source to scrub/play beyond clip boundaries'
+                  : 'Currently playing Full Source freely — switch to Clip Loop to preview only the trimmed range'
+              }
+              className={`px-2 py-1 text-[11px] font-medium rounded-md border whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                playbackScope === 'full'
+                  ? 'bg-amber-500/15 text-amber-300 border-amber-500/40'
+                  : 'bg-zinc-950 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+              }`}
+            >
+              {playbackScope === 'full' ? 'Full Source' : 'Clip Bounds'}
+            </button>
+
+            <button
+              onClick={() => setIsLooping(!isLooping)}
+              className={`flex items-center gap-1 px-2 py-1 text-[11px] font-medium rounded-md border whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                isLooping
+                  ? 'bg-zinc-800 text-white border-zinc-700'
+                  : 'bg-zinc-950 text-zinc-500 border-zinc-800'
+              }`}
+            >
+              <Repeat className="w-3 h-3" />
+              <span className="hidden sm:inline">Loop</span>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

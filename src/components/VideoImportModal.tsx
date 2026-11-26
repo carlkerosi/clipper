@@ -89,7 +89,7 @@ export const VideoImportModal: React.FC<VideoImportModalProps> = ({
       rawUrl = `https://${rawUrl}`;
     }
 
-    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|shorts\/|watch\?v=|&v=)([^#&?]*).*/;
+    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|shorts\/|live\/|watch\?v=|&v=)([^#&?]*).*/;
     const match = rawUrl.match(regExp);
     const isYoutube =
       (rawUrl.includes('youtube.com') || rawUrl.includes('youtu.be')) &&
