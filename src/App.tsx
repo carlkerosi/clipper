@@ -13,6 +13,7 @@ import { TranscriptEditor } from './components/TranscriptEditor';
 import { VideoImportModal } from './components/VideoImportModal';
 import { ExportModal } from './components/ExportModal';
 import { VideoEffectsPanel } from './components/VideoEffectsPanel';
+import { TransitionsPanel } from './components/TransitionsPanel';
 import { AiDirectorDrawer, DirectorActions } from './components/AiDirectorDrawer';
 import { MonitoringDashboard } from './components/MonitoringDashboard';
 import { AddSocialAccountModal } from './components/AddSocialAccountModal';
@@ -31,6 +32,7 @@ import {
   RotateCcw,
   Trash2,
   Cloud,
+  Blend,
 } from 'lucide-react';
 
 function buildDraftSignature(
@@ -101,6 +103,9 @@ export default function App() {
     filterSaturate: 100,
     playbackSpeed: 1,
     normalizeAudio: false,
+    compilationTransition: 'none',
+    transitionDuration: 0.6,
+    wipeDirection: 'wipeleft',
   });
 
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
@@ -117,7 +122,7 @@ export default function App() {
   const [isAiScanning, setIsAiScanning] = useState(false);
   const [isReclippingStudio, setIsReclippingStudio] = useState(false);
   const [aiBoostingClipId, setAiBoostingClipId] = useState<string | null>(null);
-  const [rightPanelTab, setRightPanelTab] = useState<'style' | 'effects' | 'transcript'>('style');
+  const [rightPanelTab, setRightPanelTab] = useState<'style' | 'effects' | 'transitions' | 'transcript'>('style');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [hasActiveEditSession, setHasActiveEditSession] = useState(false);
   const [draftBannerDismissed, setDraftBannerDismissed] = useState(false);
@@ -1651,42 +1656,54 @@ export default function App() {
                 </div>
               </section>
 
-              {/* Right Column: Style, Video Effects & Script Tabs */}
+              {/* Right Column: Style, Video Effects, Transitions & Script Tabs */}
               <section className="lg:col-span-4 h-[550px] lg:h-[calc(100vh-170px)] flex flex-col space-y-3 min-h-0">
-                <div className="flex p-0.5 bg-zinc-900 border border-zinc-800 rounded-lg shrink-0 gap-0.5">
+                <div className="flex p-0.5 bg-zinc-900 border border-zinc-800 rounded-lg shrink-0 gap-0.5 overflow-x-auto">
                   <button
                     onClick={() => setRightPanelTab('style')}
-                    className={`flex-1 py-1.5 px-2 text-xs font-medium rounded-md flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                    className={`flex-1 py-1.5 px-2 text-xs font-medium rounded-md flex items-center justify-center gap-1 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                       rightPanelTab === 'style'
                         ? 'bg-zinc-800 text-white font-semibold shadow-sm'
                         : 'text-zinc-400 hover:text-zinc-200'
                     }`}
                   >
-                    <Sliders className="w-3.5 h-3.5" />
+                    <Sliders className="w-3.5 h-3.5 shrink-0" />
                     <span>Captions</span>
                   </button>
 
                   <button
                     onClick={() => setRightPanelTab('effects')}
-                    className={`flex-1 py-1.5 px-2 text-xs font-medium rounded-md flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                    className={`flex-1 py-1.5 px-2 text-xs font-medium rounded-md flex items-center justify-center gap-1 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                       rightPanelTab === 'effects'
                         ? 'bg-zinc-800 text-white font-semibold shadow-sm'
                         : 'text-zinc-400 hover:text-zinc-200'
                     }`}
                   >
-                    <Palette className="w-3.5 h-3.5" />
-                    <span>Video Effects</span>
+                    <Palette className="w-3.5 h-3.5 shrink-0" />
+                    <span>Effects</span>
+                  </button>
+
+                  <button
+                    onClick={() => setRightPanelTab('transitions')}
+                    className={`flex-1 py-1.5 px-2 text-xs font-medium rounded-md flex items-center justify-center gap-1 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                      rightPanelTab === 'transitions'
+                        ? 'bg-zinc-800 text-white font-semibold shadow-sm'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    <Blend className="w-3.5 h-3.5 shrink-0" />
+                    <span>Transitions</span>
                   </button>
 
                   <button
                     onClick={() => setRightPanelTab('transcript')}
-                    className={`flex-1 py-1.5 px-2 text-xs font-medium rounded-md flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                    className={`flex-1 py-1.5 px-2 text-xs font-medium rounded-md flex items-center justify-center gap-1 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                       rightPanelTab === 'transcript'
                         ? 'bg-zinc-800 text-white font-semibold shadow-sm'
                         : 'text-zinc-400 hover:text-zinc-200'
                     }`}
                   >
-                    <FileText className="w-3.5 h-3.5" />
+                    <FileText className="w-3.5 h-3.5 shrink-0" />
                     <span>Dialogue ({activeClip.captions.length})</span>
                   </button>
                 </div>
@@ -1707,6 +1724,21 @@ export default function App() {
                       videoTitle={currentVideo.title}
                       clipHook={activeClip.hook}
                       currentTimestamp={currentTime}
+                    />
+                  ) : rightPanelTab === 'transitions' ? (
+                    <TransitionsPanel
+                      settings={settings}
+                      onUpdateSettings={handleUpdateSettings}
+                      clipCount={currentVideo.highlights.length}
+                      onOpenCompilationExport={() => {
+                        setExportInitialSelectedClipIds(
+                          currentVideo.highlights.slice(0, 10).map((h) => h.id)
+                        );
+                        setExportInitialMode('reel');
+                        setExportInitialResolution(undefined);
+                        setExportInitialBurnCaptions(undefined);
+                        setIsExportModalOpen(true);
+                      }}
                     />
                   ) : (
                     <TranscriptEditor
@@ -1765,6 +1797,7 @@ export default function App() {
           setAccountModalPlatform(platform);
           setIsAccountModalOpen(true);
         }}
+        onUpdateSettings={handleUpdateSettings}
       />
 
       {/* Quick Connect Social Account Modal (accessible from Export Modal) */}

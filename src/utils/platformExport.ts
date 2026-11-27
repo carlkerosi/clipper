@@ -336,6 +336,9 @@ export async function mergeSelectedClipsCompilation(options: {
       hookBannerText: settings.hookBannerText || clips[0]?.hook || '',
       title: videoSource.title || 'highlight_reel',
       platform,
+      compilationTransition: settings.compilationTransition || 'none',
+      transitionDuration: settings.transitionDuration ?? 0.6,
+      wipeDirection: settings.wipeDirection || 'wipeleft',
     }),
   });
 

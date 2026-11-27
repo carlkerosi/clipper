@@ -18,8 +18,9 @@ import {
   Film,
   ArrowUp,
   ArrowDown,
+  Blend,
 } from 'lucide-react';
-import { ClipHighlight, ExportSettings, VideoSource } from '../types';
+import { ClipHighlight, CompilationTransitionType, ExportSettings, VideoSource } from '../types';
 import {
   exportVerticalVideo,
   generateSrtFile,
@@ -55,6 +56,7 @@ interface ExportModalProps {
   initialBurnCaptions?: boolean;
   autoStartNonce?: number;
   onManageAccounts?: (platform: ExportPlatform) => void;
+  onUpdateSettings?: (newSettings: Partial<ExportSettings>) => void;
 }
 
 type BatchClipState = 'idle' | 'queued' | 'exporting' | 'done' | 'error' | 'cancelled';
@@ -82,6 +84,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   initialBurnCaptions,
   autoStartNonce = 0,
   onManageAccounts,
+  onUpdateSettings,
 }) => {
   const { getDefaultAccountForPlatform, logClipExport, workspacePrefs } = useFirebase();
   const [selectedPlatform, setSelectedPlatform] = useState<ExportPlatform>(initialPlatform);
@@ -799,13 +802,25 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       ? getDefaultAccountForPlatform(targetPlatform)
       : undefined;
 
+    const activeTrans = settings.compilationTransition || 'none';
+    const transLabel =
+      activeTrans === 'fade'
+        ? 'Fade'
+        : activeTrans === 'cross_dissolve'
+        ? 'Cross-dissolve'
+        : activeTrans === 'wipe'
+        ? 'Wipe'
+        : '';
+
     cancelBatchRef.current = false;
     setLastExportKind('reel');
     setIsExporting(true);
     setBatchCompleted(false);
     setExportProgress(18);
     setExportStatusText(
-      `Stitching ${targets.length} clips into 1 ${targetPreset.label} highlight reel MP4...`
+      `Stitching ${targets.length} clips${
+        transLabel ? ` (${transLabel})` : ''
+      } into 1 ${targetPreset.label} highlight reel MP4...`
     );
     setDownloadUrl(null);
     setExportedBlob(null);
@@ -1142,6 +1157,49 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 </div>
               </button>
             </div>
+
+            {exportMode === 'reel' && (
+              <div className="pt-1.5 flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800">
+                <div className="flex items-center gap-1.5 text-[11px] text-zinc-300 font-medium">
+                  <Blend className="w-3.5 h-3.5 text-violet-400 shrink-0" />
+                  <span>Clip Transition:</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  {(
+                    [
+                      { id: 'none', label: 'Cut' },
+                      { id: 'fade', label: 'Fade' },
+                      { id: 'cross_dissolve', label: 'Cross-dissolve' },
+                      { id: 'wipe', label: 'Wipe' },
+                    ] as Array<{ id: CompilationTransitionType; label: string }>
+                  ).map((tr) => {
+                    const active = (settings.compilationTransition || 'none') === tr.id;
+                    return (
+                      <button
+                        key={tr.id}
+                        type="button"
+                        disabled={isExporting || !onUpdateSettings}
+                        onClick={() =>
+                          onUpdateSettings?.({ compilationTransition: tr.id })
+                        }
+                        className={`px-2 py-1 rounded text-[10px] font-medium transition-colors cursor-pointer disabled:opacity-60 whitespace-nowrap ${
+                          active
+                            ? 'bg-violet-600 text-white font-semibold'
+                            : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 border border-zinc-800'
+                        }`}
+                      >
+                        {tr.label}
+                      </button>
+                    );
+                  })}
+                  {(settings.compilationTransition || 'none') !== 'none' && (
+                    <span className="ml-1 font-mono tabular-nums text-[10px] text-violet-300">
+                      {(Number(settings.transitionDuration) || 0.6).toFixed(1)}s
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Multi-Clip Feed Selector List */}

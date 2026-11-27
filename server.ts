@@ -2743,6 +2743,9 @@ app.post("/api/merge-clips", async (req, res) => {
       normalizeAudio = true,
       title = "compilation",
       platform = "tiktok",
+      compilationTransition = "none",
+      transitionDuration = 0.6,
+      wipeDirection = "wipeleft",
     } = req.body;
 
     if (!Array.isArray(clips) || clips.length < 2) {
@@ -2799,13 +2802,28 @@ app.post("/api/merge-clips", async (req, res) => {
 
         const localSeg = path.join(clipsDir, segResult.filename);
         segmentPaths.push(localSeg);
-        renderedSegments[i] = { filepath: localSeg, duration: segResult.duration };
+        const probed = await probeVideoFile(localSeg);
+        renderedSegments[i] = {
+          filepath: localSeg,
+          duration: probed.duration > 0.4 ? probed.duration : segResult.duration,
+        };
       }
     };
 
     await Promise.all(
       Array.from({ length: Math.min(3, limitedClips.length) }, () => mergeWorker())
     );
+
+    const allowedWipes = new Set(["wipeleft", "wiperight", "wipeup", "wipedown"]);
+    const safeWipe = allowedWipes.has(String(wipeDirection)) ? String(wipeDirection) : "wipeleft";
+    const xfadeName =
+      compilationTransition === "fade"
+        ? "fadeblack"
+        : compilationTransition === "cross_dissolve"
+        ? "fade"
+        : compilationTransition === "wipe"
+        ? safeWipe
+        : "none";
 
     const cleanTitle = String(title || "compilation")
       .replace(/[^a-zA-Z0-9]+/g, "_")
@@ -2820,10 +2838,52 @@ app.post("/api/merge-clips", async (req, res) => {
       ffArgs.push("-i", seg.filepath);
     });
 
-    const concatInputs = renderedSegments.map((_, idx) => `[${idx}:v][${idx}:a]`).join("");
+    const minSegDur = Math.min(...renderedSegments.map((s) => s.duration));
+    const requestedTransDur = Math.max(0.2, Math.min(2.0, Number(transitionDuration) || 0.6));
+    const useXfade = xfadeName !== "none" && renderedSegments.length >= 2 && minSegDur >= 1.5;
+
+    let filterComplex = "";
+    let totalDuration = 0;
+
+    if (useXfade) {
+      const effectiveD = Math.max(0.2, Math.min(requestedTransDur, Number((minSegDur * 0.35).toFixed(2))));
+      const filterParts: string[] = [];
+
+      renderedSegments.forEach((_, idx) => {
+        filterParts.push(`[${idx}:v]fps=30,settb=AVTB,setsar=1,setpts=PTS-STARTPTS[v${idx}]`);
+        filterParts.push(`[${idx}:a]asetpts=PTS-STARTPTS[a${idx}]`);
+      });
+
+      let cumDur = renderedSegments[0].duration;
+      let prevV = "v0";
+      let prevA = "a0";
+
+      for (let i = 1; i < renderedSegments.length; i++) {
+        const offset = Math.max(0.05, Number((cumDur - effectiveD).toFixed(3)));
+        const outV = i === renderedSegments.length - 1 ? "outv" : `vx${i}`;
+        const outA = i === renderedSegments.length - 1 ? "outa" : `ax${i}`;
+        filterParts.push(
+          `[${prevV}][v${i}]xfade=transition=${xfadeName}:duration=${effectiveD.toFixed(3)}:offset=${offset.toFixed(3)}[${outV}]`
+        );
+        filterParts.push(
+          `[${prevA}][a${i}]acrossfade=d=${effectiveD.toFixed(3)}:c1=tri:c2=tri[${outA}]`
+        );
+        cumDur = offset + renderedSegments[i].duration;
+        prevV = outV;
+        prevA = outA;
+      }
+
+      filterComplex = filterParts.join(";");
+      totalDuration = Math.max(1, Math.round(cumDur));
+    } else {
+      const concatInputs = renderedSegments.map((_, idx) => `[${idx}:v][${idx}:a]`).join("");
+      filterComplex = `${concatInputs}concat=n=${renderedSegments.length}:v=1:a=1[outv][outa]`;
+      totalDuration = Math.max(1, Math.round(renderedSegments.reduce((sum, s) => sum + s.duration, 0)));
+    }
+
     ffArgs.push(
       "-filter_complex",
-      `${concatInputs}concat=n=${renderedSegments.length}:v=1:a=1[outv][outa]`,
+      filterComplex,
       "-map",
       "[outv]",
       "-map",
@@ -2846,7 +2906,7 @@ app.post("/api/merge-clips", async (req, res) => {
     );
 
     await execFileAsync("ffmpeg", ffArgs, {
-      timeout: 95000,
+      timeout: 115000,
       maxBuffer: 12 * 1024 * 1024,
     });
 
@@ -2854,13 +2914,13 @@ app.post("/api/merge-clips", async (req, res) => {
       throw new Error("FFmpeg produced an empty merged compilation.");
     }
 
-    const totalDuration = renderedSegments.reduce((sum, s) => sum + s.duration, 0);
     return res.json({
       success: true,
       downloadUrl: `/clips/${outFilename}`,
       filename: outFilename,
       duration: totalDuration,
       clipCount: renderedSegments.length,
+      transition: compilationTransition,
     });
   } catch (err: any) {
     console.error("Merge clips error:", err);

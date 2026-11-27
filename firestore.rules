@@ -242,7 +242,8 @@ service cloud.firestore {
           'captionFontSize', 'captionEntranceAnim', 'captionExitAnim',
           'showHookBanner', 'hookBannerText', 'showProgressBar',
           'progressBarColor', 'panX', 'videoFilter', 'filterBrightness',
-          'filterContrast', 'filterSaturate', 'playbackSpeed', 'normalizeAudio'
+          'filterContrast', 'filterSaturate', 'playbackSpeed', 'normalizeAudio',
+          'compilationTransition', 'transitionDuration', 'wipeDirection'
         ]) &&
         s.resolution in ['1080p', '720p'] &&
         s.framerate in [30, 60] &&
@@ -270,7 +271,10 @@ service cloud.firestore {
         s.filterContrast is number && s.filterContrast >= 0 && s.filterContrast <= 300 &&
         s.filterSaturate is number && s.filterSaturate >= 0 && s.filterSaturate <= 300 &&
         s.playbackSpeed is number && s.playbackSpeed >= 0.5 && s.playbackSpeed <= 2.0 &&
-        s.normalizeAudio is bool;
+        s.normalizeAudio is bool &&
+        (!('compilationTransition' in s) || s.compilationTransition in ['none', 'fade', 'cross_dissolve', 'wipe']) &&
+        (!('transitionDuration' in s) || (s.transitionDuration is number && s.transitionDuration >= 0.2 && s.transitionDuration <= 2.0)) &&
+        (!('wipeDirection' in s) || s.wipeDirection in ['wipeleft', 'wiperight', 'wipeup', 'wipedown']);
     }
 
     function isValidClipDraft(data, userId, draftId) {

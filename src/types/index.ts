@@ -131,6 +131,10 @@ export type VideoFilterPreset =
   | 'cool'
   | 'vintage';
 
+export type CompilationTransitionType = 'none' | 'fade' | 'cross_dissolve' | 'wipe';
+
+export type WipeDirection = 'wipeleft' | 'wiperight' | 'wipeup' | 'wipedown';
+
 export interface ExportSettings {
   resolution: '1080p' | '720p';
   framerate: 30 | 60;
@@ -160,6 +164,9 @@ export interface ExportSettings {
   filterSaturate?: number;
   playbackSpeed?: number; // e.g. 0.85, 1, 1.15, 1.25, 1.5
   normalizeAudio?: boolean; // Broadcast -14 LUFS loudness normalization & voice clarity EQ
+  compilationTransition?: CompilationTransitionType;
+  transitionDuration?: number; // 0.2 - 2.0 seconds between clips in compilations
+  wipeDirection?: WipeDirection;
 }
 
 export type SocialPlatform = 'shorts' | 'tiktok';

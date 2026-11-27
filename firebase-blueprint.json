@@ -341,7 +341,7 @@
         },
         "settings": {
           "type": "object",
-          "description": "Studio 9:16 caption styling, color grading, playback speed, and audio mastering settings."
+          "description": "Studio 9:16 caption styling, color grading, compilation transitions, playback speed, and audio mastering settings."
         },
         "createdAt": {
           "type": "string",

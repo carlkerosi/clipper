@@ -383,6 +383,19 @@ function sanitizeDraftSettings(settings: ExportSettings): ExportSettings {
     filterSaturate: clampNum(settings?.filterSaturate, 0, 300, 100),
     playbackSpeed: clampNum(settings?.playbackSpeed, 0.5, 2.0, 1),
     normalizeAudio: Boolean(settings?.normalizeAudio),
+    compilationTransition:
+      settings?.compilationTransition === 'fade' ||
+      settings?.compilationTransition === 'cross_dissolve' ||
+      settings?.compilationTransition === 'wipe'
+        ? settings.compilationTransition
+        : 'none',
+    transitionDuration: clampNum(settings?.transitionDuration, 0.2, 2.0, 0.6),
+    wipeDirection:
+      settings?.wipeDirection === 'wiperight' ||
+      settings?.wipeDirection === 'wipeup' ||
+      settings?.wipeDirection === 'wipedown'
+        ? settings.wipeDirection
+        : 'wipeleft',
   };
 }
 
